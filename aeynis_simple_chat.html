@@ -249,7 +249,7 @@
     <div class="container">
         <div class="header">
             <h1>🌊 Aeynis</h1>
-            <p>Direct chat • KoboldCpp localhost:5001</p>
+            <p>Bridge Chat • Backend localhost:5555</p>
         </div>
 
         <div id="status" class="status">
@@ -272,7 +272,7 @@
                 <button id="sendBtn">Send</button>
             </div>
             <div class="config-info">
-                KoboldCpp @ localhost:5001 • Max: 500 tokens
+                Bridge Backend @ localhost:5555 • Basins + Memory + KoboldCpp
             </div>
         </div>
     </div>
@@ -352,29 +352,19 @@
             return prompt;
         }
 
-        async function sendToKobold(userMessage) {
-            const prompt = buildPrompt(userMessage);
-
-            const response = await fetch('http://localhost:5001/api/v1/generate', {
+        async function sendToBackend(userMessage) {
+            const response = await fetch('http://localhost:5555/api/submit', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    prompt: prompt,
-                    max_length: 500,
-                    temperature: 0.8,
-                    top_p: 0.9,
-                    top_k: 40,
-                    rep_pen: 1.1,
-                    stop_sequence: ['User:', '\nUser:', '\n\nUser:']
-                })
+                body: JSON.stringify({ message: userMessage })
             });
 
             if (!response.ok) {
-                throw new Error(`KoboldCpp returned status ${response.status}`);
+                throw new Error(`Backend returned status ${response.status}`);
             }
 
             const data = await response.json();
-            return data.results[0].text.trim();
+            return data.response;
         }
 
         async function handleSend() {
@@ -393,14 +383,14 @@
             setStatus('Thinking...');
 
             try {
-                const response = await sendToKobold(message);
+                const response = await sendToBackend(message);
                 removeThinking();
                 addMessage('assistant', response);
                 conversationHistory.push({ role: 'assistant', content: response });
                 setStatus('✓ Ready');
             } catch (error) {
                 removeThinking();
-                const errorMsg = `[Error: ${error.message}. Is KoboldCpp running on port 5001?]`;
+                const errorMsg = `[Error: ${error.message}. Is the backend running on port 5555?]`;
                 addMessage('assistant', errorMsg);
                 setStatus('❌ Error: ' + error.message, true);
             }
