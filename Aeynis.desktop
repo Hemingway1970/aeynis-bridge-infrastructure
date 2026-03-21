@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Aeynis
+Comment=Start Aeynis Bridge and open chat
+Exec=bash -c '~/bridge/stop_aeynis.sh 2>/dev/null; ~/bridge/start_aeynis.sh; sleep 1; xdg-open ~/bridge/aeynis_simple_chat.html; echo; echo "Aeynis is running. Close this window when done."; read'
+Terminal=true
+Type=Application
+Icon=utilities-terminal
