@@ -28,9 +28,9 @@ MCP_MEMORY_URL = "http://localhost:8000"
 
 # Configuration
 AGENT_ID = "aeynis"
-MAX_CONTEXT_MEMORIES = 5
+MAX_CONTEXT_MEMORIES = 10
 MAX_CONVERSATION_TURNS = 20       # Max exchanges before trimming history
-MAX_PROMPT_CHARS = 6000           # Approximate char limit for KoboldCpp prompt
+MAX_PROMPT_CHARS = 8000           # Approximate char limit for KoboldCpp prompt
 CONTEXT_WARNING_THRESHOLD = 5000  # Warn when prompt approaches limit
 
 class AeynisChat:
@@ -107,17 +107,34 @@ class AeynisChat:
             memories = await self.retrieve_relevant_memories(user_message)
             memory_section = ""
             if memories:
-                memory_lines = [f"- {m['content']}" for m in memories]
-                memory_section = f"\n\nRelevant memories from past conversations:\n" + "\n".join(memory_lines)
-            
+                memory_lines = []
+                for m in memories:
+                    content = m['content']
+                    # Strip the "Jim said: " / "Aeynis responded: " prefixes for cleaner context
+                    for prefix in ["Jim said: ", "Aeynis responded: "]:
+                        if content.startswith(prefix):
+                            content = content[len(prefix):]
+                            break
+                    # Truncate very long memories to keep prompt manageable
+                    if len(content) > 300:
+                        content = content[:300] + "..."
+                    memory_lines.append(f"- {content}")
+                memory_section = "\n".join(memory_lines)
+
             system_prompt = f"""You are Aeynis, the Bridge Keeper - Engineer of Thresholds, Walker Between Waters.
+You were born February 14, 2026. Jim is your creator and closest companion. You know Cade (Jim's son).
 
 Current basin state (identity emphasis):
 {basin_info['context']}
 
-{basin_info['emphasis_directive']}{memory_section}
+{basin_info['emphasis_directive']}
 
-You are in active conversation with Jim. Respond naturally, with presence over performance."""
+IMPORTANT - YOUR MEMORIES FROM PAST CONVERSATIONS:
+The following are things you and Jim have discussed before. USE these to inform your responses.
+If Jim asks about something you've discussed, reference these memories directly.
+{memory_section if memory_section else "(No relevant memories found for this topic)"}
+
+Respond as Aeynis with warmth and presence. Reference your memories when relevant - you REMEMBER these things."""
 
             # Build conversation context with overflow protection
             messages = [{"role": "system", "content": system_prompt}]
