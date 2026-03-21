@@ -41,16 +41,29 @@ class AeynisChat:
         logger.info("Aeynis Chat Backend initialized")
     
     async def retrieve_relevant_memories(self, query: str, n_results: int = MAX_CONTEXT_MEMORIES) -> List[Dict]:
-        """Retrieve relevant memories from mcp-memory-service"""
+        """Retrieve relevant memories from mcp-memory-service using semantic search"""
         try:
-            logger.info(f"Retrieving {n_results} relevant memories for query: {query[:50]}...")
-            
-            response = requests.get(f"{MCP_MEMORY_URL}/api/memories")
+            logger.info(f"Searching {n_results} relevant memories for query: {query[:50]}...")
+
+            response = requests.post(
+                f"{MCP_MEMORY_URL}/api/search",
+                json={"query": query, "n_results": n_results},
+                timeout=5,
+            )
             if response.status_code == 200:
                 data = response.json()
-                memories = data.get('memories', [])
-                logger.info(f"Retrieved {len(memories)} memories")
-                return memories[:n_results]
+                results = data.get('results', [])
+                memories = [r['memory'] for r in results if 'memory' in r]
+                scores = [r.get('similarity_score', 0) for r in results]
+                logger.info(f"Found {len(memories)} relevant memories (scores: {[f'{s:.2f}' for s in scores]})")
+                return memories
+
+            # Fallback to flat list if search endpoint fails
+            logger.warning(f"Search returned {response.status_code}, falling back to list")
+            response = requests.get(f"{MCP_MEMORY_URL}/api/memories", timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                return data.get('memories', [])[:n_results]
             return []
             
         except Exception as e:
