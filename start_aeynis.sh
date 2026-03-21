@@ -121,6 +121,14 @@ else
     echo "  Skipping - already running"
 fi
 
+# 5. Run memory consolidation (one-time, in background)
+echo ""
+echo "[5] Running memory consolidation..."
+cd "$BRIDGE_DIR"
+nohup python3 memory_consolidator.py \
+    > "$LOG_DIR/consolidator.log" 2>&1 &
+echo "  Running in background (PID: $!)"
+
 # Summary
 echo ""
 echo "========================================"

@@ -41,21 +41,43 @@ class AeynisChat:
         logger.info("Aeynis Chat Backend initialized")
     
     async def retrieve_relevant_memories(self, query: str, n_results: int = MAX_CONTEXT_MEMORIES) -> List[Dict]:
-        """Retrieve relevant memories from mcp-memory-service using semantic search"""
+        """Retrieve relevant memories from mcp-memory-service using semantic search.
+
+        Prioritizes consolidated summaries over individual fragments, since
+        summaries contain richer context that the model can use more effectively.
+        """
         try:
             logger.info(f"Searching {n_results} relevant memories for query: {query[:50]}...")
 
             response = requests.post(
                 f"{MCP_MEMORY_URL}/api/search",
-                json={"query": query, "n_results": n_results},
+                json={"query": query, "n_results": n_results * 2},  # Fetch extra to allow sorting
                 timeout=5,
             )
             if response.status_code == 200:
                 data = response.json()
                 results = data.get('results', [])
-                memories = [r['memory'] for r in results if 'memory' in r]
-                scores = [r.get('similarity_score', 0) for r in results]
-                logger.info(f"Found {len(memories)} relevant memories (scores: {[f'{s:.2f}' for s in scores]})")
+
+                # Separate consolidated summaries from raw fragments
+                consolidated = []
+                fragments = []
+                for r in results:
+                    mem = r.get('memory', {})
+                    score = r.get('similarity_score', 0)
+                    tags = mem.get('tags', [])
+                    if 'consolidated' in tags:
+                        consolidated.append((mem, score))
+                    else:
+                        fragments.append((mem, score))
+
+                # Prioritize consolidated memories, then fill with fragments
+                ordered = consolidated + fragments
+                memories = [m for m, s in ordered[:n_results]]
+                scores = [s for m, s in ordered[:n_results]]
+                n_cons = min(len(consolidated), n_results)
+                logger.info(f"Found {len(memories)} memories ({n_cons} consolidated, "
+                            f"{len(memories) - n_cons} fragments, "
+                            f"scores: {[f'{s:.2f}' for s in scores]})")
                 return memories
 
             # Fallback to flat list if search endpoint fails
@@ -65,7 +87,7 @@ class AeynisChat:
                 data = response.json()
                 return data.get('memories', [])[:n_results]
             return []
-            
+
         except Exception as e:
             logger.error(f"Error retrieving memories: {e}")
             return []
