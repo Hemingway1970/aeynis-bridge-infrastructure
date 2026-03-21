@@ -19,6 +19,7 @@ import argparse
 import json
 import logging
 import os
+import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 MCP_MEMORY_URL = "http://localhost:8000"
 KOBOLD_URL = "http://localhost:5001"
+MEMORY_DB = os.path.expanduser("~/.local/share/mcp-memory/sqlite_vec.db")
 
 # Consolidation settings
 SESSION_GAP_SECONDS = 600      # 10 min gap = new conversation session
@@ -40,14 +42,40 @@ CONSOLIDATION_TAG = "consolidated"
 
 
 def get_all_memories() -> List[Dict]:
-    """Fetch all memories from the service"""
+    """Fetch all memories directly from SQLite for complete access.
+
+    The HTTP API paginates at 100 max, but SQLite has all memories.
+    """
+    if not os.path.exists(MEMORY_DB):
+        logger.error(f"Memory database not found at {MEMORY_DB}")
+        return []
+
     try:
-        response = requests.get(f"{MCP_MEMORY_URL}/api/memories", timeout=10)
-        if response.status_code == 200:
-            return response.json().get('memories', [])
+        conn = sqlite3.connect(MEMORY_DB)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT content, content_hash, created_at FROM memories ORDER BY created_at ASC")
+        rows = cursor.fetchall()
+        conn.close()
+
+        memories = []
+        for row in rows:
+            content = row['content']
+            # Detect consolidated memories by prefix
+            tags = [CONSOLIDATION_TAG] if content.startswith("[Consolidated memory") else []
+            memories.append({
+                'content': content,
+                'content_hash': row['content_hash'],
+                'created_at': row['created_at'],
+                'tags': tags,
+            })
+
+        logger.info(f"Loaded {len(memories)} memories from SQLite")
+        return memories
+
     except Exception as e:
-        logger.error(f"Failed to fetch memories: {e}")
-    return []
+        logger.error(f"Failed to read SQLite: {e}")
+        return []
 
 
 def group_into_sessions(memories: List[Dict]) -> List[List[Dict]]:
