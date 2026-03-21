@@ -81,7 +81,7 @@ echo ""
 echo "[2/4] Starting Augustus Backend..."
 if check_port 8080 "Augustus"; then
     cd "$BRIDGE_DIR/Augustus/backend"
-    nohup python3 -m augustus.main \
+    nohup bash -c "source $BRIDGE_DIR/Augustus/backend/augustus_venv/bin/activate && python3 -m augustus.main" \
         > "$LOG_DIR/augustus.log" 2>&1 &
     echo $! > "$PID_DIR/augustus.pid"
     echo "  PID: $(cat "$PID_DIR/augustus.pid")"
