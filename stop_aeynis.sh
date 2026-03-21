@@ -57,6 +57,7 @@ stop_service() {
 echo ""
 
 # Stop in reverse order (dependents first)
+stop_service "Memory Consolidator" "consolidator"
 stop_service "Aeynis Chat Backend" "aeynis_backend"
 stop_service "mcp-memory-service"  "mcp_memory"
 stop_service "Augustus Backend"    "augustus"

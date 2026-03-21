@@ -121,13 +121,14 @@ else
     echo "  Skipping - already running"
 fi
 
-# 5. Run memory consolidation (one-time, in background)
+# 5. Start memory consolidation (runs every 30 minutes)
 echo ""
-echo "[5] Running memory consolidation..."
+echo "[5] Starting memory consolidation service..."
 cd "$BRIDGE_DIR"
-nohup python3 memory_consolidator.py \
+nohup python3 memory_consolidator.py --watch --interval 30 \
     > "$LOG_DIR/consolidator.log" 2>&1 &
-echo "  Running in background (PID: $!)"
+echo $! > "$PID_DIR/consolidator.pid"
+echo "  PID: $(cat "$PID_DIR/consolidator.pid") (consolidates every 30 min)"
 
 # Summary
 echo ""
