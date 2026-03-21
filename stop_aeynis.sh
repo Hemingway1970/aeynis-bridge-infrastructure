@@ -63,6 +63,16 @@ stop_service "mcp-memory-service"  "mcp_memory"
 stop_service "Augustus Backend"    "augustus"
 stop_service "KoboldCpp"           "koboldcpp"
 
+# Remove watchdog cron job so it doesn't restart services we just stopped
+echo ""
+echo -n "  Removing watchdog cron job... "
+if crontab -l 2>/dev/null | grep -qF "watchdog.sh"; then
+    crontab -l 2>/dev/null | grep -vF "watchdog.sh" | crontab -
+    echo "removed"
+else
+    echo "not installed"
+fi
+
 echo ""
 echo "========================================"
 echo "  All services stopped"

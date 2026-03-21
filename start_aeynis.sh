@@ -130,6 +130,17 @@ nohup python3 memory_consolidator.py --watch --interval 30 \
 echo $! > "$PID_DIR/consolidator.pid"
 echo "  PID: $(cat "$PID_DIR/consolidator.pid") (consolidates every 30 min)"
 
+# 6. Install watchdog cron job (restarts crashed services every minute)
+echo ""
+echo "[6] Installing watchdog cron job..."
+WATCHDOG_CMD="* * * * * $BRIDGE_DIR/watchdog.sh >> $LOG_DIR/watchdog.log 2>&1"
+if crontab -l 2>/dev/null | grep -qF "watchdog.sh"; then
+    echo "  Already installed"
+else
+    (crontab -l 2>/dev/null; echo "$WATCHDOG_CMD") | crontab -
+    echo "  Installed: checks every 60 seconds, restarts crashed services"
+fi
+
 # Summary
 echo ""
 echo "========================================"

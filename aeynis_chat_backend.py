@@ -475,4 +475,4 @@ if __name__ == '__main__':
     logger.info(f"Memory: {MCP_MEMORY_URL}")
     
     # Run with Flask
-    app.run(host='0.0.0.0', port=5555, debug=True)
+    app.run(host='0.0.0.0', port=5555, debug=False)
