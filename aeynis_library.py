@@ -87,8 +87,41 @@ def _release_lock(fp):
 # PDF extraction
 # ---------------------------------------------------------------------------
 
+def _ocr_pdf(filepath: str) -> str:
+    """OCR a scanned PDF using pdftoppm + tesseract."""
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Convert PDF pages to images
+            subprocess.run(
+                ["pdftoppm", "-png", "-r", "300", filepath,
+                 os.path.join(tmpdir, "page")],
+                capture_output=True, timeout=120, check=True,
+            )
+            # OCR each page image in order
+            pages = []
+            for img in sorted(os.listdir(tmpdir)):
+                if not img.endswith(".png"):
+                    continue
+                img_path = os.path.join(tmpdir, img)
+                result = subprocess.run(
+                    ["tesseract", img_path, "stdout"],
+                    capture_output=True, text=True, timeout=60,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    page_num = len(pages) + 1
+                    pages.append(f"--- Page {page_num} ---\n{result.stdout.strip()}")
+            if pages:
+                logger.info(f"OCR extracted {len(pages)} pages from {os.path.basename(filepath)}")
+                return "\n\n".join(pages)
+    except FileNotFoundError:
+        logger.warning("pdftoppm or tesseract not installed - cannot OCR scanned PDF")
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
+        logger.warning(f"OCR failed for {filepath}: {e}")
+    return ""
+
+
 def _extract_pdf_text(filepath: str) -> str:
-    """Extract text from a PDF using pdftotext (poppler) or PyPDF2 fallback."""
+    """Extract text from a PDF using pdftotext, PyPDF2, or OCR for scanned pages."""
     # Try pdftotext (poppler-utils) first - fastest and most accurate
     try:
         result = subprocess.run(
@@ -108,11 +141,21 @@ def _extract_pdf_text(filepath: str) -> str:
         for i, page in enumerate(reader.pages):
             text = page.extract_text() or ""
             pages.append(f"--- Page {i + 1} ---\n{text}")
-        return "\n\n".join(pages)
+        combined = "\n\n".join(pages)
+        # Check if we actually got meaningful text (scanned PDFs return near-empty)
+        text_chars = sum(1 for c in combined if c.isalpha())
+        if text_chars > 50:
+            return combined
     except Exception as e:
         logger.warning(f"PyPDF2 fallback failed for {filepath}: {e}")
 
-    return f"[Could not extract text from PDF: {os.path.basename(filepath)}]"
+    # Last resort: OCR for scanned/image-based PDFs
+    logger.info(f"No text layer found in {os.path.basename(filepath)}, attempting OCR...")
+    ocr_text = _ocr_pdf(filepath)
+    if ocr_text:
+        return ocr_text
+
+    return f"[Could not extract text from PDF: {os.path.basename(filepath)}. If scanned, install tesseract-ocr: sudo apt install tesseract-ocr]"
 
 
 # ---------------------------------------------------------------------------
