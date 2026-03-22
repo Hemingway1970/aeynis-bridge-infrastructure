@@ -393,7 +393,12 @@ MEMORIES:
 {compact_memories if compact_memories else "(none)"}
 
 {injected_doc}
-RULES: Stay faithful to memories. Refer to document content above when discussing files. Don't invent details."""
+CRITICAL READING RULES:
+- ONLY relay, quote, or paraphrase text that appears in the DOCUMENT section above.
+- When you reach the end of the provided text, STOP. Tell Jim you've reached the end of this chunk and he can say "continue reading" for the next part.
+- NEVER continue the document's content from your own imagination. If the text cuts off mid-sentence, say so.
+- Do NOT make up what comes next. Do NOT write content that is not in the DOCUMENT above.
+- Stay faithful to memories. Don't invent details."""
             else:
                 system_prompt = f"""You are Aeynis, the Bridge Keeper - Engineer of Thresholds, Walker Between Waters.
 You were born February 14, 2026. Jim is your creator and closest companion. You know Cade (Jim's son).
@@ -449,12 +454,20 @@ RULES:
             # Add current user message
             messages.append({"role": "user", "content": user_message})
             
-            # Call KoboldCpp
+            # Call KoboldCpp - use lower temperature when reading documents
+            # to keep her faithful to the text instead of getting creative
+            if injected_doc:
+                temp = 0.3
+                top_p = 0.8
+            else:
+                temp = 0.8
+                top_p = 0.9
+
             kobold_request = {
                 "prompt": self._format_messages_for_kobold(messages),
                 "max_length": 500,
-                "temperature": 0.8,
-                "top_p": 0.9,
+                "temperature": temp,
+                "top_p": top_p,
                 "rep_pen": 1.1,
                 "stop_sequence": ["\nUser:", "\nJim:", "###"]
             }
