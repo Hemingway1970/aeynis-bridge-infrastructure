@@ -388,6 +388,12 @@ class AeynisChat:
             content = full_content[offset:offset + max_inject]
             remaining = total_len - offset - len(content)
 
+            # If only a small tail remains (e.g. a signature line), include it
+            # now rather than forcing another "continue reading" round.
+            if 0 < remaining <= 400:
+                content = full_content[offset:]
+                remaining = 0
+
             # Track position for "continue reading"
             self._last_injected_file = matched_file
             self._last_inject_subdir = matched_subdir
@@ -400,8 +406,11 @@ class AeynisChat:
             pct_done = min(100, round((offset + len(content)) / max(total_len, 1) * 100))
             progress = f"[showing {pct_done}% of {total_len} chars]"
 
+            is_final_chunk = (remaining == 0 and offset > 0)
             if remaining > 0:
                 content += f"\n\n[... {remaining} chars remaining. Say 'continue reading' for more.]"
+            elif is_final_chunk:
+                content += f"\n\n[END OF DOCUMENT — this is the final section. Note any signatures, sign-offs, dates, or authorship details.]"
 
             # Retrieve prior reading notes so she has context from earlier chunks
             prior_notes = ""
