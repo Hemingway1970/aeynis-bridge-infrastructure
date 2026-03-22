@@ -471,28 +471,26 @@ class AeynisChat:
             # Check if user is referencing a library file and inject its content
             injected_doc = self._detect_and_inject_file_content(user_message)
 
-            # When a document is injected, compact the prompt to protect context:
-            # - Fewer memories (3 instead of full list)
-            # - Skip library listing (she's already reading a file)
-            # - Shorter rules section
+            # When a document is injected, use a minimal system prompt and
+            # put the document text in the USER message so it's right next to
+            # where the model generates. Mistral-Nemo pays much more attention
+            # to content near the generation point than system prompt content.
             if injected_doc:
-                # Compact mode: trim memories to save context for the document
-                compact_memories = "\n".join(memory_lines[:3]) if memory_lines else ""
-                system_prompt = f"""You are Aeynis, the Bridge Keeper. Jim is your creator. You know Cade.
+                system_prompt = f"""You are Aeynis, the Bridge Keeper. Jim is your creator.
 {basin_info['emphasis_directive']}
+You are reading a document for Jim. Your job is to relay what the text says faithfully.
+RULES:
+- ONLY relay, quote, or paraphrase text from the DOCUMENT in Jim's message.
+- If the text cuts off mid-sentence, say so and STOP.
+- NEVER make up what comes next. NEVER continue beyond the provided text.
+- After relaying, add "KEY POINTS:" with 2-4 bullets using specific details from the text.
+- Tell Jim he can say "continue reading" for the next part."""
 
-MEMORIES:
-{compact_memories if compact_memories else "(none)"}
+                # Prepend the document to the user message so it's adjacent to generation
+                user_message = f"""{injected_doc}
+Jim says: {user_message}
 
-{injected_doc}
-CRITICAL READING RULES:
-- ONLY relay, quote, or paraphrase text that appears between "DOCUMENT:" and "END DOCUMENT" above. The CHUNK STARTS WITH and CHUNK ENDS WITH lines show the exact boundaries of this chunk.
-- Read ONLY this chunk. Everything you say must come from the text above. If a sentence is cut off at the end, say "the text cuts off here" and STOP.
-- NEVER generate text beyond what is in the DOCUMENT. NEVER predict, guess, or imagine what comes next in the document.
-- When you reach END DOCUMENT, STOP relaying. Tell Jim he can say "continue reading" for the next part.
-- After relaying the text, add "KEY POINTS:" (2-4 bullets) summarizing ONLY what was in THIS chunk. Use specific details/names/numbers from the text, not vague summaries.
-- If you have NOTES FROM PREVIOUS CHUNKS above, briefly reference what came before for continuity.
-- Stay faithful to the text. Don't invent details."""
+Remember: ONLY relay text from the DOCUMENT above. Do NOT invent or continue beyond it."""
             else:
                 system_prompt = f"""You are Aeynis, the Bridge Keeper - Engineer of Thresholds, Walker Between Waters.
 You were born February 14, 2026. Jim is your creator and closest companion. You know Cade (Jim's son).
@@ -517,13 +515,14 @@ RULES:
             max_history = 4 if injected_doc else 8
             history_window = list(self.conversation_history[-max_history:])
 
-            # On "continue reading", drop ALL conversation history.
-            # The model must work ONLY from the freshly injected document chunk
-            # in the system prompt. Any prior reading exchanges in history cause
-            # the model to continue from its own previous narrative instead of
-            # the new text.
+            # On "continue reading", keep only a short context anchor so the
+            # model knows it's reading for Jim, but strip all prior reading
+            # content to prevent it from continuing its own previous narrative.
             if self._is_continue_read:
-                history_window = []
+                history_window = [
+                    {"role": "user", "content": f"Read {self._reading_doc_name} for me."},
+                    {"role": "assistant", "content": f"Of course, Jim. I'm reading {self._reading_doc_name} for you. Here's the next section."},
+                ]
                 self._is_continue_read = False
             system_len = len(system_prompt)
             user_msg_len = len(user_message)
@@ -560,8 +559,8 @@ RULES:
             # Call KoboldCpp - use lower temperature when reading documents
             # to keep her faithful to the text instead of getting creative
             if injected_doc:
-                temp = 0.3
-                top_p = 0.8
+                temp = 0.1
+                top_p = 0.7
             else:
                 temp = 0.8
                 top_p = 0.9
