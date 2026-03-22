@@ -144,8 +144,11 @@ def _extract_pdf_text(filepath: str) -> str:
         combined = "\n\n".join(pages)
         # Check if we actually got meaningful text (scanned PDFs return near-empty)
         text_chars = sum(1 for c in combined if c.isalpha())
+        logger.info(f"PyPDF2 extracted {len(reader.pages)} pages, {text_chars} alpha chars from {os.path.basename(filepath)}")
         if text_chars > 50:
             return combined
+        else:
+            logger.info(f"PyPDF2 text too sparse ({text_chars} chars) - likely scanned PDF")
     except Exception as e:
         logger.warning(f"PyPDF2 fallback failed for {filepath}: {e}")
 
@@ -262,11 +265,24 @@ class AeynisLibrary:
 
     def _resolve_path(self, filename: str, subdir: str = "") -> str:
         """Resolve a filename to a full path inside the library.
-        Prevents path traversal attacks."""
-        safe = _safe_filename(os.path.basename(filename))
+        Prevents path traversal attacks.
+
+        Tries the exact basename first (for files placed manually), then
+        falls back to the sanitized name (for files created via write/import).
+        """
+        basename = os.path.basename(filename)
         base = os.path.join(self.root, subdir) if subdir else self.root
+        root_abs = os.path.abspath(self.root)
+
+        # Try exact filename first (handles files placed manually with spaces/parens)
+        exact = os.path.abspath(os.path.join(base, basename))
+        if exact.startswith(root_abs) and os.path.exists(exact):
+            return exact
+
+        # Fall back to sanitized filename
+        safe = _safe_filename(basename)
         full = os.path.abspath(os.path.join(base, safe))
-        if not full.startswith(os.path.abspath(self.root)):
+        if not full.startswith(root_abs):
             raise ValueError("Path traversal detected")
         return full
 

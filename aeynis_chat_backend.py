@@ -181,11 +181,11 @@ class AeynisChat:
                 offset = self._last_inject_offset
             else:
                 # Gather all filenames across subdirs
-                known_files = {}  # filename -> subdir
+                known_files = {}  # lowercase filename -> (subdir, original_name)
                 for subdir in ["imports", "originals", "reviews"]:
                     for f in lib.list_files(subdir):
                         if f.get("type") != "directory":
-                            known_files[f["name"].lower()] = subdir
+                            known_files[f["name"].lower()] = (subdir, f["name"])
 
                 if not known_files:
                     return ""
@@ -198,20 +198,20 @@ class AeynisChat:
                 msg_normalized = msg_lower.replace("_", " ").replace("-", " ")
                 best_match_len = 0  # Prefer longer (more specific) matches
 
-                for fname, subdir in known_files.items():
+                for fname_lower, (subdir, original_name) in known_files.items():
                     # Match the filename (with or without extension)
-                    stem = fname.rsplit(".", 1)[0] if "." in fname else fname
+                    stem = fname_lower.rsplit(".", 1)[0] if "." in fname_lower else fname_lower
                     # Also try with underscores/hyphens converted to spaces
                     stem_normalized = stem.replace("_", " ").replace("-", " ")
-                    fname_normalized = fname.replace("_", " ").replace("-", " ")
+                    fname_normalized = fname_lower.replace("_", " ").replace("-", " ")
 
-                    if (fname in msg_lower or stem in msg_lower
+                    if (fname_lower in msg_lower or stem in msg_lower
                             or fname_normalized in msg_normalized
                             or stem_normalized in msg_normalized):
                         # Prefer longer matches (more specific filenames)
                         if len(stem) > best_match_len:
                             best_match_len = len(stem)
-                            matched_file = fname
+                            matched_file = original_name  # Use original case!
                             matched_subdir = subdir
 
                 if not matched_file:
