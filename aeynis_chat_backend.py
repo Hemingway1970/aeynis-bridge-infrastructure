@@ -53,6 +53,8 @@ class AeynisChat:
         self._last_inject_subdir = ""     # Subdir of last injected file
         self._last_inject_offset = 0      # Where we left off in the file
         self._is_continue_read = False    # True when processing a "continue reading" request
+        self._reading_doc = False         # True when a document chunk was injected this turn
+        self._reading_doc_name = ""       # Filename being read (for memory tagging)
         logger.info("Aeynis Chat Backend initialized")
     
     async def retrieve_relevant_memories(self, query: str, n_results: int = MAX_CONTEXT_MEMORIES) -> List[Dict]:
@@ -155,6 +157,65 @@ class AeynisChat:
         except Exception as e:
             logger.error(f"Error building library context: {e}")
             return ""
+
+    def _retrieve_reading_notes(self, filename: str) -> str:
+        """Retrieve prior reading notes for a document from memory.
+
+        When Aeynis reads a document chunk-by-chunk, each chunk's key points
+        are stored as a memory tagged 'reading_note:<filename>'. This method
+        retrieves those notes so she has context from previous chunks.
+        """
+        try:
+            tag = f"reading_note:{filename}"
+            response = requests.post(
+                f"{MCP_MEMORY_URL}/api/search",
+                json={"query": f"reading notes for {filename}", "n_results": 20},
+                timeout=5,
+            )
+            if response.status_code != 200:
+                return ""
+
+            results = response.json().get("results", [])
+            notes = []
+            for r in results:
+                mem = r.get("memory", {})
+                tags = mem.get("tags", [])
+                if tag in tags:
+                    notes.append(mem["content"])
+
+            if not notes:
+                return ""
+
+            # Combine notes, cap total length to protect context budget
+            combined = "\n".join(notes)
+            if len(combined) > 1500:
+                combined = combined[:1500] + "\n[... earlier notes truncated]"
+
+            return combined
+
+        except Exception as e:
+            logger.error(f"Error retrieving reading notes: {e}")
+            return ""
+
+    def _store_reading_note(self, filename: str, note_content: str, is_final: bool = False):
+        """Store a reading note for a document chunk in memory."""
+        try:
+            tag = f"reading_note:{filename}"
+            tags = ["reading_note", tag, "aeynis"]
+            if is_final:
+                tags.append("reading_complete")
+
+            requests.post(
+                f"{MCP_MEMORY_URL}/api/memories",
+                json={
+                    "content": note_content,
+                    "tags": tags,
+                },
+                timeout=5,
+            )
+            logger.info(f"Stored reading note for '{filename}' ({len(note_content)} chars, final={is_final})")
+        except Exception as e:
+            logger.error(f"Failed to store reading note: {e}")
 
     def _detect_and_inject_file_content(self, user_message: str) -> str:
         """If the user message references a file in the library, read it and return the content.
@@ -330,6 +391,9 @@ class AeynisChat:
             self._last_injected_file = matched_file
             self._last_inject_subdir = matched_subdir
             self._last_inject_offset = offset + len(content)
+            self._reading_doc = True
+            self._reading_doc_name = matched_file
+            self._last_inject_total = total_len
 
             # Build a compact header with progress info
             pct_done = min(100, round((offset + len(content)) / max(total_len, 1) * 100))
@@ -338,9 +402,20 @@ class AeynisChat:
             if remaining > 0:
                 content += f"\n\n[... {remaining} chars remaining. Say 'continue reading' for more.]"
 
+            # Retrieve prior reading notes so she has context from earlier chunks
+            prior_notes = ""
+            if is_continue:
+                notes_text = self._retrieve_reading_notes(matched_file)
+                if notes_text:
+                    prior_notes = (
+                        f"\nYOUR NOTES FROM PREVIOUS CHUNKS:\n{notes_text}\n"
+                        f"END NOTES\n"
+                    )
+
             position = f" (from char {offset})" if offset > 0 else ""
             logger.info(f"Injected library file '{matched_file}'{position} ({len(content)} chars) into conversation")
             return (
+                f"{prior_notes}"
                 f"\nDOCUMENT: {matched_subdir}/{matched_file} {progress}{position}\n"
                 f"{content}\n"
                 f"END DOCUMENT\n"
@@ -401,6 +476,8 @@ CRITICAL READING RULES:
 - When you reach the end of the provided text, STOP. Tell Jim you've reached the end of this chunk and he can say "continue reading" for the next part.
 - NEVER continue the document's content from your own imagination. If the text cuts off mid-sentence, say so.
 - Do NOT make up what comes next. Do NOT write content that is not in the DOCUMENT above.
+- After relaying the text, add a brief "KEY POINTS:" section (2-4 bullet points) summarizing what you learned from THIS chunk. These notes will be saved to your memory.
+- If you have NOTES FROM PREVIOUS CHUNKS above, use them to maintain continuity — reference what came before when relevant.
 - Stay faithful to memories. Don't invent details."""
             else:
                 system_prompt = f"""You are Aeynis, the Bridge Keeper - Engineer of Thresholds, Walker Between Waters.
@@ -683,9 +760,38 @@ RULES:
                     }
                 )
                 logger.info("Stored conversation turn in memory")
+
+                # If she just read a document chunk, extract and store reading notes
+                if self._reading_doc and self._reading_doc_name:
+                    # Extract KEY POINTS from her response if she included them
+                    key_points_match = re.search(
+                        r'KEY POINTS?:?\s*(.*)',
+                        response,
+                        re.DOTALL | re.IGNORECASE,
+                    )
+                    if key_points_match:
+                        note = key_points_match.group(1).strip()
+                    else:
+                        # Fall back to using a condensed version of her full response
+                        note = response[:500]
+
+                    # Check if this is the final chunk
+                    is_final = self._last_inject_offset >= self._last_inject_total if hasattr(self, '_last_inject_total') else False
+
+                    doc_name = self._reading_doc_name
+                    preamble = f"Reading {doc_name}"
+                    if is_final:
+                        preamble += " (FINISHED)"
+                    self._store_reading_note(
+                        doc_name,
+                        f"{preamble}: {note}",
+                        is_final=is_final,
+                    )
+                    self._reading_doc = False
+
             except Exception as e:
                 logger.error(f"Failed to store memories: {e}")
-            
+
             # 4. Evaluate and update basins
             await self.evaluate_and_update_basins(user_message, response)
             
