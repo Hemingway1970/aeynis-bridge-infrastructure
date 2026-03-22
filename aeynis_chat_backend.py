@@ -37,7 +37,7 @@ MCP_MEMORY_URL = "http://localhost:8000"
 AGENT_ID = "aeynis"
 MAX_CONTEXT_MEMORIES = 10
 MAX_CONVERSATION_TURNS = 20       # Max exchanges before trimming history
-MAX_PROMPT_CHARS = 12000          # Approximate char limit for KoboldCpp prompt
+MAX_PROMPT_CHARS = 16000          # Approximate char limit for KoboldCpp prompt
 CONTEXT_WARNING_THRESHOLD = 8000  # Warn when prompt approaches limit
 
 class AeynisChat:
@@ -190,16 +190,30 @@ class AeynisChat:
                 matched_subdir = None
 
                 # Check if any known filename appears in the message
+                # Normalize underscores/hyphens to spaces for fuzzy matching
+                msg_normalized = msg_lower.replace("_", " ").replace("-", " ")
+                best_match_len = 0  # Prefer longer (more specific) matches
+
                 for fname, subdir in known_files.items():
                     # Match the filename (with or without extension)
                     stem = fname.rsplit(".", 1)[0] if "." in fname else fname
-                    if fname in msg_lower or stem in msg_lower:
-                        matched_file = fname
-                        matched_subdir = subdir
-                        break
+                    # Also try with underscores/hyphens converted to spaces
+                    stem_normalized = stem.replace("_", " ").replace("-", " ")
+                    fname_normalized = fname.replace("_", " ").replace("-", " ")
+
+                    if (fname in msg_lower or stem in msg_lower
+                            or fname_normalized in msg_normalized
+                            or stem_normalized in msg_normalized):
+                        # Prefer longer matches (more specific filenames)
+                        if len(stem) > best_match_len:
+                            best_match_len = len(stem)
+                            matched_file = fname
+                            matched_subdir = subdir
 
                 if not matched_file:
+                    logger.info(f"No library file matched in message. Known files: {list(known_files.keys())}")
                     return ""
+                logger.info(f"Matched library file '{matched_file}' in subdir '{matched_subdir}'")
                 offset = 0
 
             # Read the file
