@@ -744,15 +744,21 @@ RULES:
 
             logger.info(f"Handling message: {user_message[:50]}...")
 
+            # Save the original user message before generate_response rewrites
+            # it with injected document content (so we don't store the doc blob
+            # as "Jim said: [giant document]")
+            original_user_message = user_message
+
             # 1. Retrieve relevant memories
             memories = await self.retrieve_relevant_memories(user_message)
             memory_context = "\n".join([m.get('content', '') for m in memories])
-            
+
             # 2. Generate response with KoboldCpp
             response = await self.generate_response(user_message, memory_context)
             
             # 3. Update conversation history (with overflow protection)
-            self.conversation_history.append({"role": "user", "content": user_message})
+            # Use original message, not the doc-injected version, to keep history clean
+            self.conversation_history.append({"role": "user", "content": original_user_message})
             self.conversation_history.append({"role": "assistant", "content": response})
 
             # Trim history if it exceeds max turns
@@ -763,11 +769,11 @@ RULES:
             
             # Store memories in mcp-memory-service
             try:
-                # Store user message
+                # Store user message (use original, not doc-injected version)
                 requests.post(
                     f"{MCP_MEMORY_URL}/api/memories",
                     json={
-                        "content": f"Jim said: {user_message}",
+                        "content": f"Jim said: {original_user_message}",
                         "tags": ["conversation", "jim", "user_input"]
                     }
                 )
@@ -808,6 +814,24 @@ RULES:
                         f"{preamble}: {note}",
                         is_final=is_final,
                     )
+
+                    # When reading is complete, store a searchable summary memory
+                    # so she can recall the document in normal conversation
+                    if is_final:
+                        all_notes = self._retrieve_reading_notes(doc_name)
+                        summary = f"I read '{doc_name}' for Jim. Here is what I learned:\n{all_notes}" if all_notes else f"I finished reading '{doc_name}' for Jim."
+                        if len(summary) > 1500:
+                            summary = summary[:1500] + "\n[... truncated]"
+                        requests.post(
+                            f"{MCP_MEMORY_URL}/api/memories",
+                            json={
+                                "content": summary,
+                                "tags": ["aeynis", "reading_summary", doc_name],
+                            },
+                            timeout=5,
+                        )
+                        logger.info(f"Stored reading summary for '{doc_name}' ({len(summary)} chars)")
+
                     self._reading_doc = False
 
             except Exception as e:
