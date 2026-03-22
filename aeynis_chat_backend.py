@@ -52,6 +52,7 @@ class AeynisChat:
         self._last_injected_file = None   # Track last file read for "continue" support
         self._last_inject_subdir = ""     # Subdir of last injected file
         self._last_inject_offset = 0      # Where we left off in the file
+        self._is_continue_read = False    # True when processing a "continue reading" request
         logger.info("Aeynis Chat Backend initialized")
     
     async def retrieve_relevant_memories(self, query: str, n_results: int = MAX_CONTEXT_MEMORIES) -> List[Dict]:
@@ -179,6 +180,8 @@ class AeynisChat:
                 matched_file = self._last_injected_file
                 matched_subdir = self._last_inject_subdir
                 offset = self._last_inject_offset
+                # Flag so generate_response can strip prior reading from history
+                self._is_continue_read = True
             else:
                 # Gather all filenames across subdirs
                 known_files = {}  # lowercase filename -> (subdir, original_name)
@@ -421,7 +424,19 @@ RULES:
             # Keep at least 2 exchanges (4 messages) even with doc injection
             # so she doesn't lose track of the conversation
             max_history = 4 if injected_doc else 8
-            history_window = self.conversation_history[-max_history:]
+            history_window = list(self.conversation_history[-max_history:])
+
+            # On "continue reading", strip the previous assistant response that
+            # relayed the prior chunk. Otherwise the model continues from its own
+            # previous narrative instead of reading the newly injected chunk.
+            if self._is_continue_read and history_window:
+                # Remove trailing assistant message (the prior chunk reading)
+                # and the user's "continue reading" / "keep going" that preceded it
+                while history_window and history_window[-1]["role"] == "assistant":
+                    history_window.pop()
+                while history_window and history_window[-1]["role"] == "user":
+                    history_window.pop()
+                self._is_continue_read = False
             system_len = len(system_prompt)
             user_msg_len = len(user_message)
             budget = MAX_PROMPT_CHARS - system_len - user_msg_len - 200  # 200 char formatting buffer
