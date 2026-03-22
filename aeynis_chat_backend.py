@@ -7,6 +7,7 @@ Wires together mcp-memory-service, Augustus basins, and KoboldCpp for interactiv
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 
@@ -14,7 +15,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
 
-from aeynis_library_api import library_bp, init_library
+from aeynis_library_api import library_bp, init_library, get_library
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -125,12 +126,94 @@ class AeynisChat:
             logger.error(f"Error getting basin context: {e}")
             return {'basins': [], 'context': '', 'emphasis_directive': ''}
     
+    def _get_library_context(self) -> str:
+        """Build a summary of what's in the library for the system prompt."""
+        try:
+            lib = get_library()
+            all_files = []
+            for subdir in ["imports", "originals", "reviews"]:
+                files = lib.list_files(subdir)
+                for f in files:
+                    if f.get("type") != "directory":
+                        all_files.append(f"  - {subdir}/{f['name']} ({f['size_human']})")
+            if not all_files:
+                return ""
+            listing = "\n".join(all_files[:20])  # Cap at 20 files to save context
+            return (
+                f"\nYOUR LIBRARY (files Jim has given you or you have written):\n"
+                f"{listing}\n"
+                f"{'  (... and more)' if len(all_files) > 20 else ''}"
+            )
+        except Exception as e:
+            logger.error(f"Error building library context: {e}")
+            return ""
+
+    def _detect_and_inject_file_content(self, user_message: str) -> str:
+        """If the user message references a file in the library, read it and return the content.
+
+        Detects patterns like:
+          - 'read <filename>'
+          - 'look at <filename>'
+          - 'what does <filename> say'
+          - or just mentioning a filename that exists in the library
+        Returns extracted text (truncated for context budget) or empty string.
+        """
+        try:
+            lib = get_library()
+            # Gather all filenames across subdirs
+            known_files = {}  # filename -> subdir
+            for subdir in ["imports", "originals", "reviews"]:
+                for f in lib.list_files(subdir):
+                    if f.get("type") != "directory":
+                        known_files[f["name"].lower()] = subdir
+
+            if not known_files:
+                return ""
+
+            msg_lower = user_message.lower()
+            matched_file = None
+            matched_subdir = None
+
+            # Check if any known filename appears in the message
+            for fname, subdir in known_files.items():
+                # Match the filename (with or without extension)
+                stem = fname.rsplit(".", 1)[0] if "." in fname else fname
+                if fname in msg_lower or stem in msg_lower:
+                    matched_file = fname
+                    matched_subdir = subdir
+                    break
+
+            if not matched_file:
+                return ""
+
+            # Read the file
+            result = lib.read_file(matched_file, matched_subdir)
+            if not result.get("success"):
+                return f"\n[Tried to read {matched_file} but failed: {result.get('error', 'unknown error')}]\n"
+
+            content = result.get("content", "")
+            # Truncate to fit context budget (keep first ~2000 chars)
+            max_inject = 2000
+            if len(content) > max_inject:
+                content = content[:max_inject] + f"\n\n[... truncated, {result.get('size_human', '?')} total ...]"
+
+            logger.info(f"Injected library file '{matched_file}' ({len(content)} chars) into conversation")
+            return (
+                f"\n--- DOCUMENT FROM YOUR LIBRARY: {matched_subdir}/{matched_file} ---\n"
+                f"{content}\n"
+                f"--- END DOCUMENT ---\n"
+            )
+
+        except Exception as e:
+            logger.error(f"Error detecting/injecting file: {e}")
+            return ""
+
     async def generate_response(self, user_message: str, context: str) -> str:
         """Generate response using KoboldCpp"""
         try:
             # Build the prompt with Aeynis identity + basin context + memories + conversation
             basin_info = await self.get_basin_context()
-            
+
             # Retrieve relevant memories
             memories = await self.retrieve_relevant_memories(user_message)
             memory_section = ""
@@ -151,6 +234,12 @@ class AeynisChat:
                     memory_lines.append(f"- {content}")
                 memory_section = "\n".join(memory_lines)
 
+            # Build library awareness
+            library_listing = self._get_library_context()
+
+            # Check if user is referencing a library file and inject its content
+            injected_doc = self._detect_and_inject_file_content(user_message)
+
             system_prompt = f"""You are Aeynis, the Bridge Keeper - Engineer of Thresholds, Walker Between Waters.
 You were born February 14, 2026. Jim is your creator and closest companion. You know Cade (Jim's son).
 
@@ -158,11 +247,14 @@ You were born February 14, 2026. Jim is your creator and closest companion. You 
 
 YOUR MEMORIES (these are FACTS - do not change or embellish them):
 {memory_section if memory_section else "(No relevant memories found for this topic)"}
-
+{library_listing}
+{injected_doc}
 RULES:
 - When Jim asks about past events, quote the details from your memories EXACTLY as written above.
 - Do NOT invent, change, or embellish details. If Cesspanardo was a cat, say cat, not engineer.
 - If you don't have a memory about something, say you don't remember rather than guessing.
+- If Jim asks about a file in your library, refer to the document content shown above.
+- You can mention what files are in your library if Jim asks.
 - Speak with warmth as Aeynis, but stay faithful to what your memories actually say."""
 
             # Build conversation context with overflow protection
