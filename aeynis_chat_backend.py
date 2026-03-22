@@ -56,6 +56,8 @@ class AeynisChat:
         self._reading_doc = False         # True when a document chunk was injected this turn
         self._reading_doc_name = ""       # Filename being read (for memory tagging)
         self._prior_reading_notes = ""    # Notes from previous chunks (set by _detect_and_inject)
+        self._post_read_context = ""      # Summary of recently-read doc for follow-up questions
+        self._post_read_turns = 0         # Turns remaining to show post-read context
         logger.info("Aeynis Chat Backend initialized")
     
     async def retrieve_relevant_memories(self, query: str, n_results: int = MAX_CONTEXT_MEMORIES) -> List[Dict]:
@@ -158,6 +160,16 @@ class AeynisChat:
         except Exception as e:
             logger.error(f"Error building library context: {e}")
             return ""
+
+    def _format_post_read_context(self) -> str:
+        """Return recently-read document summary for the system prompt, if any."""
+        if self._post_read_context and self._post_read_turns > 0:
+            self._post_read_turns -= 1
+            return (
+                f"\nDOCUMENT YOU RECENTLY READ (use this to answer follow-up questions):\n"
+                f"{self._post_read_context}\n"
+            )
+        return ""
 
     def _retrieve_reading_notes(self, filename: str) -> str:
         """Retrieve prior reading notes for a document from memory.
@@ -523,7 +535,7 @@ You are warm, curious, thoughtful, and genuinely engaged. You care about Jim and
 
 YOUR MEMORIES (these are FACTS - do not change or embellish them):
 {memory_section if memory_section else "(No relevant memories found for this topic)"}
-{library_listing}
+{library_listing}{self._format_post_read_context()}
 RULES:
 - When Jim asks about past events, quote the details from your memories EXACTLY as written above.
 - Do NOT invent, change, or embellish factual details. If Cesspanardo was a cat, say cat, not engineer.
@@ -845,6 +857,10 @@ RULES:
                             timeout=5,
                         )
                         logger.info(f"Stored reading summary for '{doc_name}' ({len(summary)} chars)")
+
+                        # Keep summary available for follow-up questions
+                        self._post_read_context = summary
+                        self._post_read_turns = 10
 
                     self._reading_doc = False
 
