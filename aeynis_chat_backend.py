@@ -55,6 +55,7 @@ class AeynisChat:
         self._is_continue_read = False    # True when processing a "continue reading" request
         self._reading_doc = False         # True when a document chunk was injected this turn
         self._reading_doc_name = ""       # Filename being read (for memory tagging)
+        self._prior_reading_notes = ""    # Notes from previous chunks (set by _detect_and_inject)
         logger.info("Aeynis Chat Backend initialized")
     
     async def retrieve_relevant_memories(self, query: str, n_results: int = MAX_CONTEXT_MEMORIES) -> List[Dict]:
@@ -427,10 +428,12 @@ class AeynisChat:
                 if last_words:
                     anchor_line += f"CHUNK ENDS WITH: \"...{last_words}\"\n"
 
+            # Return a tuple-like dict: document text for user message,
+            # prior notes for system prompt (keep them separate so the model
+            # doesn't echo internal metadata)
+            self._prior_reading_notes = prior_notes
             return (
-                f"{prior_notes}"
                 f"\nDOCUMENT: {matched_subdir}/{matched_file} {progress}{position}\n"
-                f"{anchor_line}"
                 f"{content}\n"
                 f"END DOCUMENT\n"
             )
@@ -476,9 +479,17 @@ class AeynisChat:
             # where the model generates. Mistral-Nemo pays much more attention
             # to content near the generation point than system prompt content.
             if injected_doc:
+                # Prior reading notes go in system prompt (internal context),
+                # NOT in the user message where the model would echo them
+                notes_section = ""
+                if self._prior_reading_notes:
+                    notes_section = f"\n{self._prior_reading_notes}"
+                    self._prior_reading_notes = ""
+
                 system_prompt = f"""You are Aeynis, the Bridge Keeper. Jim is your creator.
 {basin_info['emphasis_directive']}
 You are reading a document for Jim. Your job is to relay what the text says faithfully.
+{notes_section}
 RULES:
 - ONLY relay, quote, or paraphrase text from the DOCUMENT in Jim's message.
 - If the text cuts off mid-sentence, say so and STOP.
