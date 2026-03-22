@@ -252,6 +252,48 @@ class AeynisChat:
                             matched_file = original_name
                             matched_subdir = subdir
 
+                # Strategy 3: If no match in user message, check the last assistant
+                # response. Handles cases like Aeynis saying "I'll read Timeless
+                # Dynamics" and user replying "ok" / "go ahead" / "sure".
+                if not matched_file and self.conversation_history:
+                    last_msgs = [m for m in self.conversation_history[-2:]
+                                 if m["role"] == "assistant"]
+                    if last_msgs:
+                        prev_response = last_msgs[-1]["content"].lower()
+                        prev_normalized = prev_response.replace("_", " ").replace("-", " ")
+                        prev_words = set(re.findall(r'[a-z]{2,}', prev_normalized)) - noise_words
+
+                        for fname_lower, (subdir, original_name) in known_files.items():
+                            stem = fname_lower.rsplit(".", 1)[0] if "." in fname_lower else fname_lower
+                            stem_normalized = stem.replace("_", " ").replace("-", " ")
+                            fname_normalized = fname_lower.replace("_", " ").replace("-", " ")
+
+                            # Check exact substring in previous response
+                            if (fname_lower in prev_response or stem in prev_response
+                                    or fname_normalized in prev_normalized
+                                    or stem_normalized in prev_normalized):
+                                score = len(stem) + 100
+                                if score > best_score:
+                                    best_score = score
+                                    matched_file = original_name
+                                    matched_subdir = subdir
+                                continue
+
+                            # Word overlap against previous response
+                            fname_words = set(re.findall(r'[a-z]{2,}', stem_normalized)) - noise_words
+                            if not fname_words:
+                                continue
+                            overlap = prev_words & fname_words
+                            if len(overlap) >= 2 or (len(fname_words) <= 2 and len(overlap) == len(fname_words)):
+                                score = len(overlap) + len(overlap) / len(fname_words)
+                                if score > best_score:
+                                    best_score = score
+                                    matched_file = original_name
+                                    matched_subdir = subdir
+
+                        if matched_file:
+                            logger.info(f"Matched library file '{matched_file}' from previous assistant response")
+
                 if not matched_file:
                     logger.info(f"No library file matched in message. "
                                 f"msg_words={msg_words}, known_files={list(known_files.keys())}")
