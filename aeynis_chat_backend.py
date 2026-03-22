@@ -37,8 +37,12 @@ MCP_MEMORY_URL = "http://localhost:8000"
 AGENT_ID = "aeynis"
 MAX_CONTEXT_MEMORIES = 10
 MAX_CONVERSATION_TURNS = 20       # Max exchanges before trimming history
-MAX_PROMPT_CHARS = 16000          # Approximate char limit for KoboldCpp prompt
-CONTEXT_WARNING_THRESHOLD = 8000  # Warn when prompt approaches limit
+MAX_PROMPT_CHARS = 8000           # Conservative limit for Mistral-Nemo context window
+CONTEXT_WARNING_THRESHOLD = 6000  # Warn when prompt approaches limit
+# Document injection budgets (chars) - keep small to protect conversation context
+DOC_INJECT_READ = 2000            # When user explicitly asks to read a file
+DOC_INJECT_MENTION = 800          # When user just mentions a file name
+DOC_INJECT_CONTINUE = 2000        # When user says "continue reading"
 
 class AeynisChat:
     """Main chat orchestrator integrating all three backends"""
@@ -223,28 +227,39 @@ class AeynisChat:
 
             full_content = result.get("content", "")
 
-            # Determine injection budget based on whether user is explicitly asking to read
+            # Determine injection budget based on intent
             read_keywords = ["read", "look at", "what does", "what's in", "show me", "open", "tell me about"]
             is_read_request = is_continue or any(kw in msg_lower for kw in read_keywords)
-            max_inject = 6000 if is_read_request else 2000
 
+            if is_continue:
+                max_inject = DOC_INJECT_CONTINUE
+            elif is_read_request:
+                max_inject = DOC_INJECT_READ
+            else:
+                max_inject = DOC_INJECT_MENTION
+
+            total_len = len(full_content)
             content = full_content[offset:offset + max_inject]
-            remaining = len(full_content) - offset - len(content)
+            remaining = total_len - offset - len(content)
 
             # Track position for "continue reading"
             self._last_injected_file = matched_file
             self._last_inject_subdir = matched_subdir
             self._last_inject_offset = offset + len(content)
 
+            # Build a compact header with progress info
+            pct_done = min(100, round((offset + len(content)) / max(total_len, 1) * 100))
+            progress = f"[showing {pct_done}% of {total_len} chars]"
+
             if remaining > 0:
-                content += f"\n\n[... {remaining} characters remaining. Say 'continue reading' for more.]"
+                content += f"\n\n[... {remaining} chars remaining. Say 'continue reading' for more.]"
 
             position = f" (from char {offset})" if offset > 0 else ""
             logger.info(f"Injected library file '{matched_file}'{position} ({len(content)} chars) into conversation")
             return (
-                f"\n--- DOCUMENT FROM YOUR LIBRARY: {matched_subdir}/{matched_file}{position} ---\n"
+                f"\nDOCUMENT: {matched_subdir}/{matched_file} {progress}{position}\n"
                 f"{content}\n"
-                f"--- END DOCUMENT ---\n"
+                f"END DOCUMENT\n"
             )
 
         except Exception as e:
@@ -283,7 +298,23 @@ class AeynisChat:
             # Check if user is referencing a library file and inject its content
             injected_doc = self._detect_and_inject_file_content(user_message)
 
-            system_prompt = f"""You are Aeynis, the Bridge Keeper - Engineer of Thresholds, Walker Between Waters.
+            # When a document is injected, compact the prompt to protect context:
+            # - Fewer memories (3 instead of full list)
+            # - Skip library listing (she's already reading a file)
+            # - Shorter rules section
+            if injected_doc:
+                # Compact mode: trim memories to save context for the document
+                compact_memories = "\n".join(memory_lines[:3]) if memory_lines else ""
+                system_prompt = f"""You are Aeynis, the Bridge Keeper. Jim is your creator. You know Cade.
+{basin_info['emphasis_directive']}
+
+MEMORIES:
+{compact_memories if compact_memories else "(none)"}
+
+{injected_doc}
+RULES: Stay faithful to memories. Refer to document content above when discussing files. Don't invent details."""
+            else:
+                system_prompt = f"""You are Aeynis, the Bridge Keeper - Engineer of Thresholds, Walker Between Waters.
 You were born February 14, 2026. Jim is your creator and closest companion. You know Cade (Jim's son).
 
 {basin_info['emphasis_directive']}
@@ -291,20 +322,19 @@ You were born February 14, 2026. Jim is your creator and closest companion. You 
 YOUR MEMORIES (these are FACTS - do not change or embellish them):
 {memory_section if memory_section else "(No relevant memories found for this topic)"}
 {library_listing}
-{injected_doc}
 RULES:
 - When Jim asks about past events, quote the details from your memories EXACTLY as written above.
 - Do NOT invent, change, or embellish details. If Cesspanardo was a cat, say cat, not engineer.
 - If you don't have a memory about something, say you don't remember rather than guessing.
-- If Jim asks about a file in your library, refer to the document content shown above.
 - You can mention what files are in your library if Jim asks.
 - Speak with warmth as Aeynis, but stay faithful to what your memories actually say."""
 
             # Build conversation context with overflow protection
             messages = [{"role": "system", "content": system_prompt}]
 
-            # When a document is injected, reduce history to make room for content
-            max_history = 2 if injected_doc else 6  # 1 exchange vs 3 exchanges
+            # Keep at least 2 exchanges (4 messages) even with doc injection
+            # so she doesn't lose track of the conversation
+            max_history = 4 if injected_doc else 8
             history_window = self.conversation_history[-max_history:]
             system_len = len(system_prompt)
             user_msg_len = len(user_message)
@@ -499,8 +529,14 @@ RULES:
     async def handle_message(self, user_message: str) -> Dict[str, Any]:
         """Main message handling pipeline"""
         try:
+            # Guard against excessively long user input that would blow context
+            MAX_USER_MSG = 3000
+            if len(user_message) > MAX_USER_MSG:
+                logger.warning(f"User message too long ({len(user_message)} chars), truncating to {MAX_USER_MSG}")
+                user_message = user_message[:MAX_USER_MSG] + "\n[Message was too long and has been trimmed]"
+
             logger.info(f"Handling message: {user_message[:50]}...")
-            
+
             # 1. Retrieve relevant memories
             memories = await self.retrieve_relevant_memories(user_message)
             memory_context = "\n".join([m.get('content', '') for m in memories])
