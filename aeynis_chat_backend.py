@@ -193,10 +193,23 @@ class AeynisChat:
                 matched_file = None
                 matched_subdir = None
 
-                # Check if any known filename appears in the message
-                # Normalize underscores/hyphens to spaces for fuzzy matching
+                # Check if any known filename matches the message.
+                # Uses multiple strategies:
+                #   1. Exact substring match (filename or stem appears in message)
+                #   2. Word overlap scoring (how many meaningful words from the
+                #      filename appear in the message)
                 msg_normalized = msg_lower.replace("_", " ").replace("-", " ")
-                best_match_len = 0  # Prefer longer (more specific) matches
+                # Extract meaningful words from user message (skip short/common words)
+                noise_words = {"the", "a", "an", "and", "or", "but", "is", "are", "was",
+                               "were", "be", "been", "to", "of", "in", "for", "on", "at",
+                               "by", "it", "my", "me", "do", "can", "you", "she", "her",
+                               "that", "this", "what", "from", "with", "about", "read",
+                               "look", "show", "open", "tell", "file", "book", "paper",
+                               "pdf", "document", "please", "could", "would", "have",
+                               "has", "had", "let", "try", "see", "new", "one", "get"}
+                msg_words = set(re.findall(r'[a-z]{2,}', msg_normalized)) - noise_words
+                best_score = 0  # Higher is better
+                best_match_len = 0
 
                 for fname_lower, (subdir, original_name) in known_files.items():
                     # Match the filename (with or without extension)
@@ -205,17 +218,43 @@ class AeynisChat:
                     stem_normalized = stem.replace("_", " ").replace("-", " ")
                     fname_normalized = fname_lower.replace("_", " ").replace("-", " ")
 
+                    # Strategy 1: exact substring match (strongest signal)
                     if (fname_lower in msg_lower or stem in msg_lower
                             or fname_normalized in msg_normalized
                             or stem_normalized in msg_normalized):
-                        # Prefer longer matches (more specific filenames)
-                        if len(stem) > best_match_len:
-                            best_match_len = len(stem)
-                            matched_file = original_name  # Use original case!
+                        # Exact matches get a high score based on match length
+                        score = len(stem) + 100
+                        if score > best_score:
+                            best_score = score
+                            matched_file = original_name
+                            matched_subdir = subdir
+                        continue
+
+                    # Strategy 2: word overlap - count how many meaningful words
+                    # from the filename also appear in the user's message
+                    fname_words = set(re.findall(r'[a-z]{2,}', stem_normalized)) - noise_words
+                    if not fname_words:
+                        continue
+                    overlap = msg_words & fname_words
+                    if len(overlap) >= 1:
+                        # Score = fraction of filename words matched, weighted by
+                        # absolute count so "timeless dynamics" beats just "timeless"
+                        score = len(overlap) + len(overlap) / len(fname_words)
+                        # Require at least 50% of filename words to match for short names
+                        # or at least 2 words for longer names, to avoid false positives
+                        fname_word_count = len(fname_words)
+                        if fname_word_count <= 2 and len(overlap) < fname_word_count:
+                            continue
+                        if fname_word_count > 2 and len(overlap) < 2:
+                            continue
+                        if score > best_score:
+                            best_score = score
+                            matched_file = original_name
                             matched_subdir = subdir
 
                 if not matched_file:
-                    logger.info(f"No library file matched in message. Known files: {list(known_files.keys())}")
+                    logger.info(f"No library file matched in message. "
+                                f"msg_words={msg_words}, known_files={list(known_files.keys())}")
                     return ""
                 logger.info(f"Matched library file '{matched_file}' in subdir '{matched_subdir}'")
                 offset = 0
