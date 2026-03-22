@@ -414,9 +414,23 @@ class AeynisChat:
 
             position = f" (from char {offset})" if offset > 0 else ""
             logger.info(f"Injected library file '{matched_file}'{position} ({len(content)} chars) into conversation")
+
+            # Extract first and last few words of the actual chunk text
+            # (strip the "[... remaining]" footer first) for anchor verification
+            raw_text = content.split("\n\n[...")[0].strip()
+            words = raw_text.split()
+            first_words = " ".join(words[:6]) if words else ""
+            last_words = " ".join(words[-6:]) if len(words) > 6 else ""
+            anchor_line = ""
+            if first_words:
+                anchor_line = f"CHUNK STARTS WITH: \"{first_words}...\"\n"
+                if last_words:
+                    anchor_line += f"CHUNK ENDS WITH: \"...{last_words}\"\n"
+
             return (
                 f"{prior_notes}"
                 f"\nDOCUMENT: {matched_subdir}/{matched_file} {progress}{position}\n"
+                f"{anchor_line}"
                 f"{content}\n"
                 f"END DOCUMENT\n"
             )
@@ -472,13 +486,13 @@ MEMORIES:
 
 {injected_doc}
 CRITICAL READING RULES:
-- ONLY relay, quote, or paraphrase text that appears in the DOCUMENT section above.
-- When you reach the end of the provided text, STOP. Tell Jim you've reached the end of this chunk and he can say "continue reading" for the next part.
-- NEVER continue the document's content from your own imagination. If the text cuts off mid-sentence, say so.
-- Do NOT make up what comes next. Do NOT write content that is not in the DOCUMENT above.
-- After relaying the text, add a brief "KEY POINTS:" section (2-4 bullet points) summarizing what you learned from THIS chunk. These notes will be saved to your memory.
-- If you have NOTES FROM PREVIOUS CHUNKS above, use them to maintain continuity — reference what came before when relevant.
-- Stay faithful to memories. Don't invent details."""
+- ONLY relay, quote, or paraphrase text that appears between "DOCUMENT:" and "END DOCUMENT" above. The CHUNK STARTS WITH and CHUNK ENDS WITH lines show the exact boundaries of this chunk.
+- Read ONLY this chunk. Everything you say must come from the text above. If a sentence is cut off at the end, say "the text cuts off here" and STOP.
+- NEVER generate text beyond what is in the DOCUMENT. NEVER predict, guess, or imagine what comes next in the document.
+- When you reach END DOCUMENT, STOP relaying. Tell Jim he can say "continue reading" for the next part.
+- After relaying the text, add "KEY POINTS:" (2-4 bullets) summarizing ONLY what was in THIS chunk. Use specific details/names/numbers from the text, not vague summaries.
+- If you have NOTES FROM PREVIOUS CHUNKS above, briefly reference what came before for continuity.
+- Stay faithful to the text. Don't invent details."""
             else:
                 system_prompt = f"""You are Aeynis, the Bridge Keeper - Engineer of Thresholds, Walker Between Waters.
 You were born February 14, 2026. Jim is your creator and closest companion. You know Cade (Jim's son).
@@ -503,16 +517,13 @@ RULES:
             max_history = 4 if injected_doc else 8
             history_window = list(self.conversation_history[-max_history:])
 
-            # On "continue reading", strip the previous assistant response that
-            # relayed the prior chunk. Otherwise the model continues from its own
-            # previous narrative instead of reading the newly injected chunk.
-            if self._is_continue_read and history_window:
-                # Remove trailing assistant message (the prior chunk reading)
-                # and the user's "continue reading" / "keep going" that preceded it
-                while history_window and history_window[-1]["role"] == "assistant":
-                    history_window.pop()
-                while history_window and history_window[-1]["role"] == "user":
-                    history_window.pop()
+            # On "continue reading", drop ALL conversation history.
+            # The model must work ONLY from the freshly injected document chunk
+            # in the system prompt. Any prior reading exchanges in history cause
+            # the model to continue from its own previous narrative instead of
+            # the new text.
+            if self._is_continue_read:
+                history_window = []
                 self._is_continue_read = False
             system_len = len(system_prompt)
             user_msg_len = len(user_message)
