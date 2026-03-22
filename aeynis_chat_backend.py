@@ -14,12 +14,18 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
 
+from aeynis_library_api import library_bp, init_library
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)  # Allow Lux's frontend to connect
+
+# Register the Library blueprint and initialize with default path
+app.register_blueprint(library_bp)
+init_library()  # Creates ~/AeynisLibrary with 50GB quota
 
 # Backend URLs
 KOBOLD_URL = "http://localhost:5001"

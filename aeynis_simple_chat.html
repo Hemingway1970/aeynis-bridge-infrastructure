@@ -243,6 +243,177 @@
         .chat-area::-webkit-scrollbar-thumb:hover {
             background: #555;
         }
+
+        /* Library Panel */
+        .library-panel {
+            display: none;
+            position: absolute;
+            top: 0; right: 0; bottom: 0;
+            width: 360px;
+            background: white;
+            border-left: 2px solid #dee2e6;
+            box-shadow: -4px 0 20px rgba(0,0,0,0.1);
+            z-index: 100;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .library-panel.open {
+            display: flex;
+        }
+
+        .library-header {
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            color: white;
+            padding: 16px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .library-header h2 {
+            font-size: 18px;
+            margin: 0;
+        }
+
+        .library-close {
+            background: none;
+            border: none;
+            color: white;
+            font-size: 22px;
+            cursor: pointer;
+            padding: 0 4px;
+        }
+
+        .library-usage {
+            padding: 10px 16px;
+            background: #e8f5e9;
+            font-size: 12px;
+            color: #2e7d32;
+            border-bottom: 1px solid #c8e6c9;
+        }
+
+        .library-usage .usage-bar {
+            height: 6px;
+            background: #c8e6c9;
+            border-radius: 3px;
+            margin-top: 6px;
+            overflow: hidden;
+        }
+
+        .library-usage .usage-fill {
+            height: 100%;
+            background: #43a047;
+            border-radius: 3px;
+            transition: width 0.3s;
+        }
+
+        .library-tabs {
+            display: flex;
+            border-bottom: 1px solid #dee2e6;
+        }
+
+        .library-tabs button {
+            flex: 1;
+            padding: 10px;
+            border: none;
+            background: #f8f9fa;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+            color: #6c757d;
+            transition: all 0.2s;
+        }
+
+        .library-tabs button.active {
+            background: white;
+            color: #11998e;
+            border-bottom: 2px solid #11998e;
+        }
+
+        .library-filelist {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px;
+        }
+
+        .library-file {
+            display: flex;
+            align-items: center;
+            padding: 10px 12px;
+            margin: 4px 0;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.2s;
+            font-size: 13px;
+            gap: 10px;
+        }
+
+        .library-file:hover {
+            background: #f0f9f4;
+        }
+
+        .library-file .file-icon {
+            font-size: 20px;
+            flex-shrink: 0;
+        }
+
+        .library-file .file-details {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .library-file .file-name {
+            font-weight: 600;
+            color: #333;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .library-file .file-meta {
+            font-size: 11px;
+            color: #999;
+            margin-top: 2px;
+        }
+
+        .library-empty {
+            text-align: center;
+            padding: 40px 20px;
+            color: #999;
+            font-size: 14px;
+        }
+
+        .container {
+            position: relative;
+        }
+
+        #libraryBtn {
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            color: white;
+        }
+
+        #libraryBtn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 2px 8px rgba(17, 153, 142, 0.3);
+        }
+
+        /* File link in chat messages */
+        .file-link {
+            display: inline-block;
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            color: white;
+            padding: 4px 12px;
+            border-radius: 12px;
+            text-decoration: none;
+            font-size: 13px;
+            margin: 4px 2px;
+            transition: opacity 0.2s;
+        }
+
+        .file-link:hover {
+            opacity: 0.85;
+        }
     </style>
 </head>
 <body>
@@ -258,8 +429,27 @@
 
         <div class="chat-area" id="chatArea"></div>
 
+        <!-- Library Side Panel -->
+        <div class="library-panel" id="libraryPanel">
+            <div class="library-header">
+                <h2>Aeynis Library</h2>
+                <button class="library-close" id="libraryClose">&times;</button>
+            </div>
+            <div class="library-usage" id="libraryUsage">Loading...</div>
+            <div class="library-tabs">
+                <button class="active" data-subdir="">All</button>
+                <button data-subdir="originals">Originals</button>
+                <button data-subdir="reviews">Reviews</button>
+                <button data-subdir="imports">Imports</button>
+            </div>
+            <div class="library-filelist" id="libraryFileList">
+                <div class="library-empty">Loading files...</div>
+            </div>
+        </div>
+
         <div class="input-area">
             <div class="controls">
+                <button id="libraryBtn">📚 Library</button>
                 <button id="saveConvo">💾 Save Conversation</button>
                 <button id="clearChat">🗑️ Clear Chat</button>
             </div>
@@ -272,7 +462,7 @@
                 <button id="sendBtn">Send</button>
             </div>
             <div class="config-info">
-                Bridge Backend @ localhost:5555 • Basins + Memory + KoboldCpp
+                Bridge Backend @ localhost:5555 • Basins + Memory + KoboldCpp + Library
             </div>
         </div>
     </div>
@@ -440,6 +630,129 @@
         });
 
         messageInput.focus();
+
+        // ---------------------------------------------------------------
+        // Library Panel
+        // ---------------------------------------------------------------
+        const BACKEND = 'http://localhost:5555';
+        const libraryPanel = document.getElementById('libraryPanel');
+        const libraryBtn = document.getElementById('libraryBtn');
+        const libraryClose = document.getElementById('libraryClose');
+        const libraryFileList = document.getElementById('libraryFileList');
+        const libraryUsage = document.getElementById('libraryUsage');
+        let currentLibrarySubdir = '';
+
+        libraryBtn.addEventListener('click', () => {
+            libraryPanel.classList.toggle('open');
+            if (libraryPanel.classList.contains('open')) {
+                loadLibraryFiles(currentLibrarySubdir);
+            }
+        });
+
+        libraryClose.addEventListener('click', () => {
+            libraryPanel.classList.remove('open');
+        });
+
+        // Tab switching
+        document.querySelectorAll('.library-tabs button').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.library-tabs button').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentLibrarySubdir = btn.dataset.subdir;
+                loadLibraryFiles(currentLibrarySubdir);
+            });
+        });
+
+        async function loadLibraryFiles(subdir) {
+            try {
+                const res = await fetch(`${BACKEND}/library/files?subdir=${encodeURIComponent(subdir)}`);
+                const data = await res.json();
+
+                // Update usage bar
+                const u = data.usage;
+                libraryUsage.innerHTML = `
+                    ${u.used_human} / ${u.limit_human} used (${u.percent_used}%)
+                    <div class="usage-bar"><div class="usage-fill" style="width:${Math.min(u.percent_used, 100)}%"></div></div>
+                `;
+
+                // Render file list
+                if (data.files.length === 0) {
+                    libraryFileList.innerHTML = '<div class="library-empty">No files yet. Aeynis can write documents here.</div>';
+                    return;
+                }
+
+                libraryFileList.innerHTML = data.files.map(f => {
+                    const icon = fileIcon(f.type, f.name);
+                    if (f.type === 'directory') {
+                        return `<div class="library-file" onclick="loadLibraryFiles('${f.path.replace(/\/$/, '')}')">
+                            <span class="file-icon">${icon}</span>
+                            <div class="file-details">
+                                <div class="file-name">${f.name}</div>
+                                <div class="file-meta">Directory</div>
+                            </div>
+                        </div>`;
+                    }
+                    const viewUrl = `${BACKEND}/library/serve/${encodeURIComponent(f.path)}`;
+                    return `<div class="library-file" onclick="window.open('${viewUrl}', '_blank')">
+                        <span class="file-icon">${icon}</span>
+                        <div class="file-details">
+                            <div class="file-name">${f.name}</div>
+                            <div class="file-meta">${f.size_human} &middot; ${new Date(f.modified).toLocaleDateString()}</div>
+                        </div>
+                    </div>`;
+                }).join('');
+            } catch (err) {
+                libraryFileList.innerHTML = `<div class="library-empty">Error loading library: ${err.message}</div>`;
+            }
+        }
+
+        function fileIcon(mimeType, name) {
+            if (name && name.endsWith('/')) return '📁';
+            if (!mimeType) return '📄';
+            if (mimeType.includes('pdf')) return '📕';
+            if (mimeType.includes('html')) return '🌐';
+            if (mimeType.includes('markdown') || (name && name.endsWith('.md'))) return '📝';
+            if (mimeType.includes('text')) return '📄';
+            if (mimeType.includes('opendocument')) return '📘';
+            return '📎';
+        }
+
+        // Parse file links in assistant messages: [file:path/to/file.md]
+        function renderFileLinks(text) {
+            return text.replace(/\[file:([^\]]+)\]/g, (match, path) => {
+                const url = `${BACKEND}/library/serve/${encodeURIComponent(path.trim())}`;
+                const name = path.split('/').pop();
+                return `<a href="${url}" target="_blank" class="file-link">📄 ${name}</a>`;
+            });
+        }
+
+        // Override addMessage to support file links
+        const _origAddMessage = addMessage;
+        addMessage = function(role, content) {
+            const msgDiv = document.createElement('div');
+            msgDiv.className = `message ${role}`;
+
+            const label = document.createElement('div');
+            label.className = 'message-label';
+            label.textContent = role === 'user' ? 'You' : 'Aeynis';
+
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'message-content';
+
+            if (role === 'assistant') {
+                // Render file links as clickable elements
+                contentDiv.innerHTML = renderFileLinks(
+                    content.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                );
+            } else {
+                contentDiv.textContent = content;
+            }
+
+            msgDiv.appendChild(label);
+            msgDiv.appendChild(contentDiv);
+            chatArea.appendChild(msgDiv);
+            chatArea.scrollTop = chatArea.scrollHeight;
+        };
     </script>
 </body>
 </html>
