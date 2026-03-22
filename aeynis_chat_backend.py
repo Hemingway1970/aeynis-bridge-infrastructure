@@ -37,14 +37,17 @@ MCP_MEMORY_URL = "http://localhost:8000"
 AGENT_ID = "aeynis"
 MAX_CONTEXT_MEMORIES = 10
 MAX_CONVERSATION_TURNS = 20       # Max exchanges before trimming history
-MAX_PROMPT_CHARS = 8000           # Approximate char limit for KoboldCpp prompt
-CONTEXT_WARNING_THRESHOLD = 5000  # Warn when prompt approaches limit
+MAX_PROMPT_CHARS = 12000          # Approximate char limit for KoboldCpp prompt
+CONTEXT_WARNING_THRESHOLD = 8000  # Warn when prompt approaches limit
 
 class AeynisChat:
     """Main chat orchestrator integrating all three backends"""
-    
+
     def __init__(self):
         self.conversation_history = []
+        self._last_injected_file = None   # Track last file read for "continue" support
+        self._last_inject_subdir = ""     # Subdir of last injected file
+        self._last_inject_offset = 0      # Where we left off in the file
         logger.info("Aeynis Chat Backend initialized")
     
     async def retrieve_relevant_memories(self, query: str, n_results: int = MAX_CONTEXT_MEMORIES) -> List[Dict]:
@@ -155,51 +158,77 @@ class AeynisChat:
           - 'read <filename>'
           - 'look at <filename>'
           - 'what does <filename> say'
+          - 'continue reading' / 'keep reading' / 'read more'
           - or just mentioning a filename that exists in the library
         Returns extracted text (truncated for context budget) or empty string.
         """
         try:
             lib = get_library()
-            # Gather all filenames across subdirs
-            known_files = {}  # filename -> subdir
-            for subdir in ["imports", "originals", "reviews"]:
-                for f in lib.list_files(subdir):
-                    if f.get("type") != "directory":
-                        known_files[f["name"].lower()] = subdir
-
-            if not known_files:
-                return ""
-
             msg_lower = user_message.lower()
-            matched_file = None
-            matched_subdir = None
 
-            # Check if any known filename appears in the message
-            for fname, subdir in known_files.items():
-                # Match the filename (with or without extension)
-                stem = fname.rsplit(".", 1)[0] if "." in fname else fname
-                if fname in msg_lower or stem in msg_lower:
-                    matched_file = fname
-                    matched_subdir = subdir
-                    break
+            # Check for "continue reading" request
+            continue_keywords = ["continue reading", "keep reading", "read more", "next page",
+                                 "go on", "more of the book", "more of the file", "keep going"]
+            is_continue = any(kw in msg_lower for kw in continue_keywords)
 
-            if not matched_file:
-                return ""
+            if is_continue and self._last_injected_file:
+                matched_file = self._last_injected_file
+                matched_subdir = self._last_inject_subdir
+                offset = self._last_inject_offset
+            else:
+                # Gather all filenames across subdirs
+                known_files = {}  # filename -> subdir
+                for subdir in ["imports", "originals", "reviews"]:
+                    for f in lib.list_files(subdir):
+                        if f.get("type") != "directory":
+                            known_files[f["name"].lower()] = subdir
+
+                if not known_files:
+                    return ""
+
+                matched_file = None
+                matched_subdir = None
+
+                # Check if any known filename appears in the message
+                for fname, subdir in known_files.items():
+                    # Match the filename (with or without extension)
+                    stem = fname.rsplit(".", 1)[0] if "." in fname else fname
+                    if fname in msg_lower or stem in msg_lower:
+                        matched_file = fname
+                        matched_subdir = subdir
+                        break
+
+                if not matched_file:
+                    return ""
+                offset = 0
 
             # Read the file
             result = lib.read_file(matched_file, matched_subdir)
             if not result.get("success"):
                 return f"\n[Tried to read {matched_file} but failed: {result.get('error', 'unknown error')}]\n"
 
-            content = result.get("content", "")
-            # Truncate to fit context budget (keep first ~2000 chars)
-            max_inject = 2000
-            if len(content) > max_inject:
-                content = content[:max_inject] + f"\n\n[... truncated, {result.get('size_human', '?')} total ...]"
+            full_content = result.get("content", "")
 
-            logger.info(f"Injected library file '{matched_file}' ({len(content)} chars) into conversation")
+            # Determine injection budget based on whether user is explicitly asking to read
+            read_keywords = ["read", "look at", "what does", "what's in", "show me", "open", "tell me about"]
+            is_read_request = is_continue or any(kw in msg_lower for kw in read_keywords)
+            max_inject = 6000 if is_read_request else 2000
+
+            content = full_content[offset:offset + max_inject]
+            remaining = len(full_content) - offset - len(content)
+
+            # Track position for "continue reading"
+            self._last_injected_file = matched_file
+            self._last_inject_subdir = matched_subdir
+            self._last_inject_offset = offset + len(content)
+
+            if remaining > 0:
+                content += f"\n\n[... {remaining} characters remaining. Say 'continue reading' for more.]"
+
+            position = f" (from char {offset})" if offset > 0 else ""
+            logger.info(f"Injected library file '{matched_file}'{position} ({len(content)} chars) into conversation")
             return (
-                f"\n--- DOCUMENT FROM YOUR LIBRARY: {matched_subdir}/{matched_file} ---\n"
+                f"\n--- DOCUMENT FROM YOUR LIBRARY: {matched_subdir}/{matched_file}{position} ---\n"
                 f"{content}\n"
                 f"--- END DOCUMENT ---\n"
             )
@@ -260,8 +289,9 @@ RULES:
             # Build conversation context with overflow protection
             messages = [{"role": "system", "content": system_prompt}]
 
-            # Trim conversation history to prevent context overflow
-            history_window = self.conversation_history[-6:]  # Last 3 exchanges
+            # When a document is injected, reduce history to make room for content
+            max_history = 2 if injected_doc else 6  # 1 exchange vs 3 exchanges
+            history_window = self.conversation_history[-max_history:]
             system_len = len(system_prompt)
             user_msg_len = len(user_message)
             budget = MAX_PROMPT_CHARS - system_len - user_msg_len - 200  # 200 char formatting buffer
