@@ -166,7 +166,7 @@ class AeynisChat:
         if self._post_read_context and self._post_read_turns > 0:
             self._post_read_turns -= 1
             return (
-                f"\nDOCUMENT YOU RECENTLY READ (use this to answer follow-up questions):\n"
+                f"\nYOUR READING NOTES (reference for follow-up discussion - do NOT re-read or produce KEY POINTS from these; just use them to inform your conversation):\n"
                 f"{self._post_read_context}\n"
             )
         return ""
@@ -422,7 +422,14 @@ class AeynisChat:
             if remaining > 0:
                 content += f"\n\n[... {remaining} chars remaining. Say 'continue reading' for more.]"
             elif is_final_chunk:
-                content += f"\n\n[END OF DOCUMENT — this is the final section. Note any signatures, sign-offs, dates, or authorship details.]"
+                # Extract the last few lines to highlight potential signature
+                tail_lines = content.rstrip().split('\n')
+                tail_text = "\n".join(tail_lines[-5:]).strip()
+                content += (
+                    f"\n\n[END OF DOCUMENT — this is the final section.]\n"
+                    f"[DOCUMENT ENDING (last lines):\n{tail_text}\n"
+                    f"Report who signed or authored this document in your KEY POINTS.]"
+                )
 
             # Retrieve prior reading notes so she has context from earlier chunks
             prior_notes = ""
@@ -449,12 +456,13 @@ class AeynisChat:
                 if last_words:
                     anchor_line += f"CHUNK ENDS WITH: \"...{last_words}\"\n"
 
-            # Return a tuple-like dict: document text for user message,
-            # prior notes for system prompt (keep them separate so the model
+            # Return document text for user message.
+            # Prior notes go into system prompt (keep them separate so the model
             # doesn't echo internal metadata)
             self._prior_reading_notes = prior_notes
             return (
                 f"\nDOCUMENT: {matched_subdir}/{matched_file} {progress}{position}\n"
+                f"{anchor_line}"
                 f"{content}\n"
                 f"END DOCUMENT\n"
             )
