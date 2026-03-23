@@ -429,8 +429,7 @@ class AeynisChat:
 
             is_final_chunk = (remaining == 0 and offset > 0)
             if remaining > 0:
-                content = f"[PARTIAL SECTION — more text follows after this. Do NOT say the document ends.]\n{content}"
-                content += f"\n\n[THIS IS NOT THE END. {remaining} chars remaining. Tell Jim to say 'continue reading' for the next part.]"
+                content += f"\n\n[... {remaining} chars remaining. This section continues — tell Jim to say 'continue reading' for the next part.]"
             elif is_final_chunk:
                 # Extract the last few lines to highlight potential signature
                 tail_lines = content.rstrip().split('\n')
