@@ -353,13 +353,18 @@ class DocumentCache:
                 f"({pct}% complete)]"
             )
         elif chunk["is_eof"]:
-            # Extract tail for signature detection
+            # Extract tail for signature detection (10 lines to catch
+            # signatures with spacing, sign-off, name, date, etc.)
             tail_lines = text.rstrip().split('\n')
-            tail_text = "\n".join(tail_lines[-5:]).strip()
+            tail_text = "\n".join(tail_lines[-10:]).strip()
             doc_parts.append(
                 f"\n[END OF DOCUMENT — this is the final section.]\n"
                 f"[DOCUMENT ENDING (last lines):\n{tail_text}\n"
-                f"Report who signed or authored this document in your KEY POINTS.]"
+                f"IMPORTANT: When you finish reading this section aloud, "
+                f"explicitly state who signed or authored this document. "
+                f"If there is a signature, sign-off, or author name in "
+                f"the text above, READ IT ALOUD to Jim — do not skip it. "
+                f"Also note the author/signer in your KEY POINTS.]"
             )
 
         doc_parts.append("END DOCUMENT")

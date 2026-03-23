@@ -507,7 +507,7 @@ RULES:
 - After relaying the text, add "KEY POINTS:" with 2-4 bullets about themes, events, or people mentioned in THIS section.
 - You may share brief reactions — you're a person, not a scanner.
 - When you see [NEXT PAGE PREVIEW], that's a glimpse of what comes next. Use it only as an anchor — do NOT read it aloud. Stop at the [SECTION_BREAK] marker. Tell Jim there's more and he can say "keep going" to hear the rest. Do NOT say the document "ends" or "cuts off".
-- Only say the document has ended when you see [END OF DOCUMENT]."""
+- Only say the document has ended when you see [END OF DOCUMENT]. When you reach the end, READ EVERY LINE including any signature, sign-off, closing, or author name. NEVER skip the last lines — they often contain the signature."""
 
                 # Prepend the document to the user message so it's adjacent to generation
                 user_message = f"""{injected_doc}
