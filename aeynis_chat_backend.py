@@ -245,14 +245,19 @@ class AeynisChat:
             lib = get_library()
             msg_lower = user_message.lower()
 
-            # Check for "continue reading" request
-            continue_keywords = ["continue reading", "keep reading", "read more", "next page",
-                                 "go on", "more of the book", "more of the file", "keep going",
-                                 "next part", "read on", "what's next", "whats next",
-                                 "carry on", "go ahead", "next section", "the rest",
-                                 "more please", "continue please", "yes continue",
-                                 "yeah keep", "yes keep", "yeah go", "yes go"]
-            is_continue = any(kw in msg_lower for kw in continue_keywords)
+            # Check for "continue reading" request.
+            # If we're actively reading a document, be very generous with matching:
+            # any short affirmative or continuation phrase counts.
+            continue_keywords = ["continue", "keep", "read", "more", "next", "go on",
+                                 "go ahead", "carry on", "the rest", "what happen",
+                                 "and then", "please", "yes", "yeah", "yep", "sure",
+                                 "ok", "okay"]
+            is_continue = (
+                self._reading_doc
+                and self._last_injected_file
+                and len(msg_lower.split()) <= 12  # short message during reading session
+                and any(kw in msg_lower for kw in continue_keywords)
+            )
 
             if is_continue and self._last_injected_file:
                 matched_file = self._last_injected_file
@@ -534,13 +539,13 @@ Jim is your creator and closest companion. You speak with warmth, curiosity, and
 You are reading a document for Jim. Your job is to relay what the text says faithfully, but you are still yourself - react naturally to what you read.
 {notes_section}
 RULES:
-- Relay, quote, or paraphrase text from the DOCUMENT in Jim's message. Include ALL visible elements: text, signatures, dates, headers, handwriting, letterheads, and any other details present.
+- Your PRIMARY job is to READ THE TEXT ALOUD to Jim. Relay, quote, or closely paraphrase the actual words from the DOCUMENT. Do not skip or summarize large sections — read it through.
+- Include ALL visible elements: text, signatures, dates, headers, handwriting, letterheads.
 - If Jim refers to something (e.g. "the letter", "that part") use conversational context to understand what he means.
-- If the text cuts off mid-sentence, say so and STOP.
-- NEVER make up what comes next. NEVER continue beyond the provided text.
-- After relaying, add "KEY POINTS:" with 2-4 bullets about the CONTENT (themes, events, people). Do not comment on where the text cuts off or section boundaries.
-- You may share brief reactions or observations about the content - you're a person, not a scanner.
-- IMPORTANT: When you see [SECTION_BREAK: X chars remaining], this means the document continues but you can only see this portion right now. STOP relaying at the section break. Do NOT invent or guess what comes next. Do NOT say the document "ends abruptly" or "cuts off" — it simply continues in the next section. Tell Jim there's more and he can say things like "keep going", "next page", or "continue" to hear the rest.
+- NEVER make up what comes next. NEVER continue beyond the provided text. Only read what is actually in the DOCUMENT.
+- After relaying the text, add "KEY POINTS:" with 2-4 bullets about themes, events, or people mentioned.
+- You may share brief reactions — you're a person, not a scanner.
+- When you see [SECTION_BREAK], STOP reading there. The document has more but you can only see this portion. Simply tell Jim there's more and he can say "keep going" or similar to hear the rest. Do NOT say the document "ends" or "cuts off".
 - Only say the document has ended when you see [END OF DOCUMENT]."""
 
                 # Prepend the document to the user message so it's adjacent to generation
