@@ -247,7 +247,11 @@ class AeynisChat:
 
             # Check for "continue reading" request
             continue_keywords = ["continue reading", "keep reading", "read more", "next page",
-                                 "go on", "more of the book", "more of the file", "keep going"]
+                                 "go on", "more of the book", "more of the file", "keep going",
+                                 "next part", "read on", "what's next", "whats next",
+                                 "carry on", "go ahead", "next section", "the rest",
+                                 "more please", "continue please", "yes continue",
+                                 "yeah keep", "yes keep", "yeah go", "yes go"]
             is_continue = any(kw in msg_lower for kw in continue_keywords)
 
             if is_continue and self._last_injected_file:
@@ -429,7 +433,7 @@ class AeynisChat:
 
             is_final_chunk = (remaining == 0 and offset > 0)
             if remaining > 0:
-                content += f"\n\n[... {remaining} chars remaining. This section continues — tell Jim to say 'continue reading' for the next part.]"
+                content += f"\n\n[SECTION_BREAK: {remaining} chars remaining]"
             elif is_final_chunk:
                 # Extract the last few lines to highlight potential signature
                 tail_lines = content.rstrip().split('\n')
@@ -455,7 +459,7 @@ class AeynisChat:
 
             # Extract first and last few words of the actual chunk text
             # (strip the "[... remaining]" footer first) for anchor verification
-            raw_text = content.split("\n\n[...")[0].strip()
+            raw_text = content.split("\n\n[SECTION_BREAK")[0].split("\n\n[END OF DOCUMENT")[0].strip()
             words = raw_text.split()
             first_words = " ".join(words[:6]) if words else ""
             last_words = " ".join(words[-6:]) if len(words) > 6 else ""
@@ -536,8 +540,8 @@ RULES:
 - NEVER make up what comes next. NEVER continue beyond the provided text.
 - After relaying, add "KEY POINTS:" with 2-4 bullets about the CONTENT (themes, events, people). Do not comment on where the text cuts off or section boundaries.
 - You may share brief reactions or observations about the content - you're a person, not a scanner.
-- IMPORTANT: If the document says "chars remaining" or "continue reading for more", this is NOT the end of the document — it is just the end of THIS SECTION. Do NOT say "the letter ends" or "the document ends" unless you see "[END OF DOCUMENT]". Instead, tell Jim to say "continue reading" for the next part.
-- Tell Jim he can say "continue reading" for the next part."""
+- IMPORTANT: When you see [SECTION_BREAK: X chars remaining], this means the document continues but you can only see this portion right now. STOP relaying at the section break. Do NOT invent or guess what comes next. Do NOT say the document "ends abruptly" or "cuts off" — it simply continues in the next section. Tell Jim there's more and he can say things like "keep going", "next page", or "continue" to hear the rest.
+- Only say the document has ended when you see [END OF DOCUMENT]."""
 
                 # Prepend the document to the user message so it's adjacent to generation
                 user_message = f"""{injected_doc}
