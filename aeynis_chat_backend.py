@@ -398,6 +398,15 @@ class AeynisChat:
 
             total_len = len(full_content)
             content = full_content[offset:offset + max_inject]
+
+            # Avoid cutting mid-word: back up to the last whitespace
+            if offset + max_inject < total_len and content and not content[-1].isspace():
+                last_space = content.rfind(' ')
+                last_newline = content.rfind('\n')
+                break_at = max(last_space, last_newline)
+                if break_at > len(content) // 2:  # Only if we don't lose too much
+                    content = content[:break_at + 1]
+
             remaining = total_len - offset - len(content)
 
             # If only a small tail remains (e.g. a signature line), include it
@@ -420,7 +429,8 @@ class AeynisChat:
 
             is_final_chunk = (remaining == 0 and offset > 0)
             if remaining > 0:
-                content += f"\n\n[... {remaining} chars remaining. Say 'continue reading' for more.]"
+                content = f"[PARTIAL SECTION — more text follows after this. Do NOT say the document ends.]\n{content}"
+                content += f"\n\n[THIS IS NOT THE END. {remaining} chars remaining. Tell Jim to say 'continue reading' for the next part.]"
             elif is_final_chunk:
                 # Extract the last few lines to highlight potential signature
                 tail_lines = content.rstrip().split('\n')
@@ -525,7 +535,7 @@ RULES:
 - If Jim refers to something (e.g. "the letter", "that part") use conversational context to understand what he means.
 - If the text cuts off mid-sentence, say so and STOP.
 - NEVER make up what comes next. NEVER continue beyond the provided text.
-- After relaying, add "KEY POINTS:" with 2-4 bullets using specific details from the text.
+- After relaying, add "KEY POINTS:" with 2-4 bullets about the CONTENT (themes, events, people). Do not comment on where the text cuts off or section boundaries.
 - You may share brief reactions or observations about the content - you're a person, not a scanner.
 - IMPORTANT: If the document says "chars remaining" or "continue reading for more", this is NOT the end of the document — it is just the end of THIS SECTION. Do NOT say "the letter ends" or "the document ends" unless you see "[END OF DOCUMENT]". Instead, tell Jim to say "continue reading" for the next part.
 - Tell Jim he can say "continue reading" for the next part."""
