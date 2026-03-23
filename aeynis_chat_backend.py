@@ -527,6 +527,7 @@ RULES:
 - NEVER make up what comes next. NEVER continue beyond the provided text.
 - After relaying, add "KEY POINTS:" with 2-4 bullets using specific details from the text.
 - You may share brief reactions or observations about the content - you're a person, not a scanner.
+- IMPORTANT: If the document says "chars remaining" or "continue reading for more", this is NOT the end of the document — it is just the end of THIS SECTION. Do NOT say "the letter ends" or "the document ends" unless you see "[END OF DOCUMENT]". Instead, tell Jim to say "continue reading" for the next part.
 - Tell Jim he can say "continue reading" for the next part."""
 
                 # Prepend the document to the user message so it's adjacent to generation
