@@ -16,6 +16,7 @@ from flask_cors import CORS
 import requests
 
 from aeynis_library_api import library_bp, init_library, get_library
+from document_cache import DocumentCache
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -39,25 +40,30 @@ MAX_CONTEXT_MEMORIES = 10
 MAX_CONVERSATION_TURNS = 20       # Max exchanges before trimming history
 MAX_PROMPT_CHARS = 8000           # Conservative limit for Mistral-Nemo context window
 CONTEXT_WARNING_THRESHOLD = 6000  # Warn when prompt approaches limit
-# Document injection budgets (chars) - keep small to protect conversation context
-DOC_INJECT_READ = 2000            # When user explicitly asks to read a file
-DOC_INJECT_MENTION = 800          # When user just mentions a file name
-DOC_INJECT_CONTINUE = 2000        # When user says "continue reading"
+# Document injection budgets are now handled by DocumentCache.chunk_size (~4000 chars)
+# The cache loads the entire file into RAM and serves consistent chunks with look-ahead.
 
 class AeynisChat:
     """Main chat orchestrator integrating all three backends"""
 
     def __init__(self):
         self.conversation_history = []
-        self._last_injected_file = None   # Track last file read for "continue" support
-        self._last_inject_subdir = ""     # Subdir of last injected file
-        self._last_inject_offset = 0      # Where we left off in the file
+
+        # RAM-based document cache — replaces the old offset-tracking approach
+        self._doc_cache = DocumentCache()
+
+        # Turn-level flags (reset each turn in generate_response)
         self._is_continue_read = False    # True when processing a "continue reading" request
         self._reading_doc = False         # True when a document chunk was injected this turn
         self._reading_doc_name = ""       # Filename being read (for memory tagging)
-        self._prior_reading_notes = ""    # Notes from previous chunks (set by _detect_and_inject)
+        self._reading_context = ""        # Map + summary context for system prompt (set by _detect_and_inject)
+
+        # Post-read follow-up support
         self._post_read_context = ""      # Summary of recently-read doc for follow-up questions
         self._post_read_turns = 0         # Turns remaining to show post-read context
+
+        # Track the last chunk for map updates after response
+        self._last_chunk_info: Optional[Dict] = None
         logger.info("Aeynis Chat Backend initialized")
     
     async def retrieve_relevant_memories(self, query: str, n_results: int = MAX_CONTEXT_MEMORIES) -> List[Dict]:
@@ -230,260 +236,216 @@ class AeynisChat:
         except Exception as e:
             logger.error(f"Failed to store reading note: {e}")
 
-    def _detect_and_inject_file_content(self, user_message: str) -> str:
-        """If the user message references a file in the library, read it and return the content.
+    def _detect_backtrack_request(self, msg_lower: str) -> Optional[str]:
+        """Detect if the user is asking to go back to a specific part of the document.
 
-        Detects patterns like:
-          - 'read <filename>'
-          - 'look at <filename>'
-          - 'what does <filename> say'
-          - 'continue reading' / 'keep reading' / 'read more'
-          - or just mentioning a filename that exists in the library
-        Returns extracted text (truncated for context budget) or empty string.
+        Returns the search query if backtracking detected, None otherwise.
+        Patterns: "go back to the part about X", "what did it say about Y",
+                  "re-read the section on Z", "find where it mentioned [topic]"
+        """
+        backtrack_patterns = [
+            r"(?:go\s+back|return)\s+to\s+(?:the\s+)?(?:part|section|bit|place)\s+(?:about|where|on|with)\s+(.+)",
+            r"(?:re-?read|reread)\s+(?:the\s+)?(?:part|section|bit)?\s*(?:about|where|on|with)?\s*(.+)",
+            r"what\s+did\s+it\s+say\s+(?:about|regarding|on)\s+(.+)",
+            r"find\s+(?:the\s+)?(?:part|section|place)?\s*(?:where|about|that|when)\s+(?:it\s+)?(?:mentioned?|talked?|said?|discuss)\s*(.+)",
+            r"(?:can\s+you\s+)?(?:go\s+back\s+to|find)\s+(?:where\s+)?(?:it\s+)?(?:mentions?|talks?\s+about|says?|discusses?)\s+(.+)",
+        ]
+        for pattern in backtrack_patterns:
+            m = re.search(pattern, msg_lower)
+            if m:
+                query = m.group(1).strip().rstrip("?.,!")
+                if len(query) > 2:
+                    return query
+        return None
+
+    def _detect_and_inject_file_content(self, user_message: str) -> str:
+        """If the user message references a file in the library, serve it from RAM cache.
+
+        Flow:
+          1. If actively reading AND user says "continue" / short affirmative → next chunk from cache
+          2. If actively reading AND user asks to go back → search & jump in cache
+          3. Otherwise, match filename → load full file HD→RAM (clearing any previous) → first chunk
+        Returns formatted document block for user message, or empty string.
         """
         try:
             lib = get_library()
             msg_lower = user_message.lower()
 
-            # Check for "continue reading" request.
-            # If we're actively reading a document, be very generous with matching:
-            # any short affirmative or continuation phrase counts.
+            # ── Continue reading (next chunk from RAM cache) ─────────────
             continue_keywords = ["continue", "keep", "read", "more", "next", "go on",
                                  "go ahead", "carry on", "the rest", "what happen",
                                  "and then", "please", "yes", "yeah", "yep", "sure",
                                  "ok", "okay"]
             is_continue = (
-                self._reading_doc
-                and self._last_injected_file
-                and len(msg_lower.split()) <= 12  # short message during reading session
+                self._doc_cache.is_loaded
+                and not self._doc_cache.is_complete
+                and len(msg_lower.split()) <= 12
                 and any(kw in msg_lower for kw in continue_keywords)
             )
 
-            if is_continue and self._last_injected_file:
-                matched_file = self._last_injected_file
-                matched_subdir = self._last_inject_subdir
-                offset = self._last_inject_offset
-                # Flag so generate_response can strip prior reading from history
-                self._is_continue_read = True
-            else:
-                # Gather all filenames across subdirs
-                known_files = {}  # lowercase filename -> (subdir, original_name)
-                for subdir in ["imports", "originals", "reviews"]:
-                    for f in lib.list_files(subdir):
-                        if f.get("type") != "directory":
-                            known_files[f["name"].lower()] = (subdir, f["name"])
-
-                if not known_files:
-                    return ""
-
-                matched_file = None
-                matched_subdir = None
-
-                # Check if any known filename matches the message.
-                # Uses multiple strategies:
-                #   1. Exact substring match (filename or stem appears in message)
-                #   2. Word overlap scoring (how many meaningful words from the
-                #      filename appear in the message)
-                msg_normalized = msg_lower.replace("_", " ").replace("-", " ")
-                # Extract meaningful words from user message (skip short/common words)
-                noise_words = {"the", "a", "an", "and", "or", "but", "is", "are", "was",
-                               "were", "be", "been", "to", "of", "in", "for", "on", "at",
-                               "by", "it", "my", "me", "do", "can", "you", "she", "her",
-                               "that", "this", "what", "from", "with", "about", "read",
-                               "look", "show", "open", "tell", "file", "book", "paper",
-                               "pdf", "document", "please", "could", "would", "have",
-                               "has", "had", "let", "try", "see", "new", "one", "get"}
-                msg_words = set(re.findall(r'[a-z]{2,}', msg_normalized)) - noise_words
-                best_score = 0  # Higher is better
-                best_match_len = 0
-
-                for fname_lower, (subdir, original_name) in known_files.items():
-                    # Match the filename (with or without extension)
-                    stem = fname_lower.rsplit(".", 1)[0] if "." in fname_lower else fname_lower
-                    # Also try with underscores/hyphens converted to spaces
-                    stem_normalized = stem.replace("_", " ").replace("-", " ")
-                    fname_normalized = fname_lower.replace("_", " ").replace("-", " ")
-
-                    # Strategy 1: exact substring match (strongest signal)
-                    if (fname_lower in msg_lower or stem in msg_lower
-                            or fname_normalized in msg_normalized
-                            or stem_normalized in msg_normalized):
-                        # Exact matches get a high score based on match length
-                        score = len(stem) + 100
-                        if score > best_score:
-                            best_score = score
-                            matched_file = original_name
-                            matched_subdir = subdir
-                        continue
-
-                    # Strategy 2: word overlap - count how many meaningful words
-                    # from the filename also appear in the user's message
-                    fname_words = set(re.findall(r'[a-z]{2,}', stem_normalized)) - noise_words
-                    if not fname_words:
-                        continue
-                    overlap = msg_words & fname_words
-                    if len(overlap) >= 1:
-                        # Score = fraction of filename words matched, weighted by
-                        # absolute count so "timeless dynamics" beats just "timeless"
-                        score = len(overlap) + len(overlap) / len(fname_words)
-                        # Require at least 50% of filename words to match for short names
-                        # or at least 2 words for longer names, to avoid false positives
-                        fname_word_count = len(fname_words)
-                        if fname_word_count <= 2 and len(overlap) < fname_word_count:
-                            continue
-                        if fname_word_count > 2 and len(overlap) < 2:
-                            continue
-                        if score > best_score:
-                            best_score = score
-                            matched_file = original_name
-                            matched_subdir = subdir
-
-                # Strategy 3: If no match in user message, check the last assistant
-                # response. Handles cases like Aeynis saying "I'll read Timeless
-                # Dynamics" and user replying "ok" / "go ahead" / "sure".
-                if not matched_file and self.conversation_history:
-                    last_msgs = [m for m in self.conversation_history[-2:]
-                                 if m["role"] == "assistant"]
-                    if last_msgs:
-                        prev_response = last_msgs[-1]["content"].lower()
-                        prev_normalized = prev_response.replace("_", " ").replace("-", " ")
-                        prev_words = set(re.findall(r'[a-z]{2,}', prev_normalized)) - noise_words
-
-                        for fname_lower, (subdir, original_name) in known_files.items():
-                            stem = fname_lower.rsplit(".", 1)[0] if "." in fname_lower else fname_lower
-                            stem_normalized = stem.replace("_", " ").replace("-", " ")
-                            fname_normalized = fname_lower.replace("_", " ").replace("-", " ")
-
-                            # Check exact substring in previous response
-                            if (fname_lower in prev_response or stem in prev_response
-                                    or fname_normalized in prev_normalized
-                                    or stem_normalized in prev_normalized):
-                                score = len(stem) + 100
-                                if score > best_score:
-                                    best_score = score
-                                    matched_file = original_name
-                                    matched_subdir = subdir
-                                continue
-
-                            # Word overlap against previous response
-                            fname_words = set(re.findall(r'[a-z]{2,}', stem_normalized)) - noise_words
-                            if not fname_words:
-                                continue
-                            overlap = prev_words & fname_words
-                            if len(overlap) >= 2 or (len(fname_words) <= 2 and len(overlap) == len(fname_words)):
-                                score = len(overlap) + len(overlap) / len(fname_words)
-                                if score > best_score:
-                                    best_score = score
-                                    matched_file = original_name
-                                    matched_subdir = subdir
-
-                        if matched_file:
-                            logger.info(f"Matched library file '{matched_file}' from previous assistant response")
-
-                if not matched_file:
-                    logger.info(f"No library file matched in message. "
-                                f"msg_words={msg_words}, known_files={list(known_files.keys())}")
-                    return ""
-                logger.info(f"Matched library file '{matched_file}' in subdir '{matched_subdir}'")
-                offset = 0
-
-            # Read the file
-            result = lib.read_file(matched_file, matched_subdir)
-            if not result.get("success"):
-                return f"\n[Tried to read {matched_file} but failed: {result.get('error', 'unknown error')}]\n"
-
-            full_content = result.get("content", "")
-
-            # Determine injection budget based on intent
-            read_keywords = ["read", "look at", "what does", "what's in", "show me", "open", "tell me about"]
-            is_read_request = is_continue or any(kw in msg_lower for kw in read_keywords)
-
             if is_continue:
-                max_inject = DOC_INJECT_CONTINUE
-            elif is_read_request:
-                max_inject = DOC_INJECT_READ
-            else:
-                max_inject = DOC_INJECT_MENTION
+                self._is_continue_read = True
+                chunk = self._doc_cache.get_next_chunk()
+                if not chunk:
+                    return ""
+                self._reading_doc = True
+                self._reading_doc_name = self._doc_cache.filename or ""
+                self._last_chunk_info = chunk
+                document_block, reading_context = self._doc_cache.format_chunk_for_injection(chunk)
+                self._reading_context = reading_context
+                logger.info(
+                    f"Served continue chunk for '{self._doc_cache.filename}' "
+                    f"({chunk['progress_pct']}% complete, {chunk['remaining']:,} remaining)"
+                )
+                return f"\n{document_block}\n"
 
-            total_len = len(full_content)
-            content = full_content[offset:offset + max_inject]
+            # ── Backtrack request (search & jump within cached doc) ──────
+            if self._doc_cache.is_loaded:
+                backtrack_query = self._detect_backtrack_request(msg_lower)
+                if backtrack_query:
+                    chunk = self._doc_cache.search_and_jump(backtrack_query)
+                    if chunk:
+                        self._is_continue_read = True  # reset history for clean read
+                        self._reading_doc = True
+                        self._reading_doc_name = self._doc_cache.filename or ""
+                        self._last_chunk_info = chunk
+                        document_block, reading_context = self._doc_cache.format_chunk_for_injection(chunk)
+                        self._reading_context = reading_context
+                        logger.info(
+                            f"Backtrack jump for '{self._doc_cache.filename}' "
+                            f"to match '{backtrack_query}' at char {chunk['start']}"
+                        )
+                        return f"\n{document_block}\n"
+                    else:
+                        logger.info(f"Backtrack search found no match for '{backtrack_query}'")
 
-            # Avoid cutting mid-word: back up to the last whitespace
-            if offset + max_inject < total_len and content and not content[-1].isspace():
-                last_space = content.rfind(' ')
-                last_newline = content.rfind('\n')
-                break_at = max(last_space, last_newline)
-                if break_at > len(content) // 2:  # Only if we don't lose too much
-                    content = content[:break_at + 1]
+            # ── New file reference (match filename → load HD→RAM) ────────
+            known_files = {}  # lowercase filename -> (subdir, original_name)
+            for subdir in ["imports", "originals", "reviews"]:
+                for f in lib.list_files(subdir):
+                    if f.get("type") != "directory":
+                        known_files[f["name"].lower()] = (subdir, f["name"])
 
-            remaining = total_len - offset - len(content)
+            if not known_files:
+                return ""
 
-            # If only a small tail remains (e.g. a signature line), include it
-            # now rather than forcing another "continue reading" round.
-            if 0 < remaining <= 400:
-                content = full_content[offset:]
-                remaining = 0
+            matched_file = None
+            matched_subdir = None
 
-            # Track position for "continue reading"
-            self._last_injected_file = matched_file
-            self._last_inject_subdir = matched_subdir
-            self._last_inject_offset = offset + len(content)
+            msg_normalized = msg_lower.replace("_", " ").replace("-", " ")
+            noise_words = {"the", "a", "an", "and", "or", "but", "is", "are", "was",
+                           "were", "be", "been", "to", "of", "in", "for", "on", "at",
+                           "by", "it", "my", "me", "do", "can", "you", "she", "her",
+                           "that", "this", "what", "from", "with", "about", "read",
+                           "look", "show", "open", "tell", "file", "book", "paper",
+                           "pdf", "document", "please", "could", "would", "have",
+                           "has", "had", "let", "try", "see", "new", "one", "get"}
+            msg_words = set(re.findall(r'[a-z]{2,}', msg_normalized)) - noise_words
+            best_score = 0
+
+            for fname_lower, (subdir, original_name) in known_files.items():
+                stem = fname_lower.rsplit(".", 1)[0] if "." in fname_lower else fname_lower
+                stem_normalized = stem.replace("_", " ").replace("-", " ")
+                fname_normalized = fname_lower.replace("_", " ").replace("-", " ")
+
+                # Strategy 1: exact substring match (strongest signal)
+                if (fname_lower in msg_lower or stem in msg_lower
+                        or fname_normalized in msg_normalized
+                        or stem_normalized in msg_normalized):
+                    score = len(stem) + 100
+                    if score > best_score:
+                        best_score = score
+                        matched_file = original_name
+                        matched_subdir = subdir
+                    continue
+
+                # Strategy 2: word overlap scoring
+                fname_words = set(re.findall(r'[a-z]{2,}', stem_normalized)) - noise_words
+                if not fname_words:
+                    continue
+                overlap = msg_words & fname_words
+                if len(overlap) >= 1:
+                    score = len(overlap) + len(overlap) / len(fname_words)
+                    fname_word_count = len(fname_words)
+                    if fname_word_count <= 2 and len(overlap) < fname_word_count:
+                        continue
+                    if fname_word_count > 2 and len(overlap) < 2:
+                        continue
+                    if score > best_score:
+                        best_score = score
+                        matched_file = original_name
+                        matched_subdir = subdir
+
+            # Strategy 3: check last assistant response
+            if not matched_file and self.conversation_history:
+                last_msgs = [m for m in self.conversation_history[-2:]
+                             if m["role"] == "assistant"]
+                if last_msgs:
+                    prev_response = last_msgs[-1]["content"].lower()
+                    prev_normalized = prev_response.replace("_", " ").replace("-", " ")
+                    prev_words = set(re.findall(r'[a-z]{2,}', prev_normalized)) - noise_words
+
+                    for fname_lower, (subdir, original_name) in known_files.items():
+                        stem = fname_lower.rsplit(".", 1)[0] if "." in fname_lower else fname_lower
+                        stem_normalized = stem.replace("_", " ").replace("-", " ")
+                        fname_normalized = fname_lower.replace("_", " ").replace("-", " ")
+
+                        if (fname_lower in prev_response or stem in prev_response
+                                or fname_normalized in prev_normalized
+                                or stem_normalized in prev_normalized):
+                            score = len(stem) + 100
+                            if score > best_score:
+                                best_score = score
+                                matched_file = original_name
+                                matched_subdir = subdir
+                            continue
+
+                        fname_words = set(re.findall(r'[a-z]{2,}', stem_normalized)) - noise_words
+                        if not fname_words:
+                            continue
+                        overlap = prev_words & fname_words
+                        if len(overlap) >= 2 or (len(fname_words) <= 2 and len(overlap) == len(fname_words)):
+                            score = len(overlap) + len(overlap) / len(fname_words)
+                            if score > best_score:
+                                best_score = score
+                                matched_file = original_name
+                                matched_subdir = subdir
+
+                    if matched_file:
+                        logger.info(f"Matched library file '{matched_file}' from previous assistant response")
+
+            if not matched_file:
+                logger.info(f"No library file matched in message. "
+                            f"msg_words={msg_words}, known_files={list(known_files.keys())}")
+                return ""
+            logger.info(f"Matched library file '{matched_file}' in subdir '{matched_subdir}'")
+
+            # ── Load file: HD → RAM cache ────────────────────────────────
+            # If switching documents, cache.load() auto-clears the old one (no ghosting)
+            if self._doc_cache.filename != matched_file:
+                result = lib.read_file(matched_file, matched_subdir)
+                if not result.get("success"):
+                    return f"\n[Tried to read {matched_file} but failed: {result.get('error', 'unknown error')}]\n"
+                full_content = result.get("content", "")
+                with_stmt_note = "HD→RAM transfer complete"
+                self._doc_cache.load(matched_file, matched_subdir, full_content)
+                logger.info(f"Loaded '{matched_file}' into RAM cache ({len(full_content):,} chars). {with_stmt_note}")
+
+            # ── Serve first chunk from RAM ───────────────────────────────
+            chunk = self._doc_cache.get_next_chunk()
+            if not chunk:
+                return ""
+
             self._reading_doc = True
             self._reading_doc_name = matched_file
-            self._last_inject_total = total_len
-
-            # Build a compact header with progress info
-            pct_done = min(100, round((offset + len(content)) / max(total_len, 1) * 100))
-            progress = f"[showing {pct_done}% of {total_len} chars]"
-
-            is_final_chunk = (remaining == 0 and offset > 0)
-            if remaining > 0:
-                content += f"\n\n[SECTION_BREAK: {remaining} chars remaining]"
-            elif is_final_chunk:
-                # Extract the last few lines to highlight potential signature
-                tail_lines = content.rstrip().split('\n')
-                tail_text = "\n".join(tail_lines[-5:]).strip()
-                content += (
-                    f"\n\n[END OF DOCUMENT — this is the final section.]\n"
-                    f"[DOCUMENT ENDING (last lines):\n{tail_text}\n"
-                    f"Report who signed or authored this document in your KEY POINTS.]"
-                )
-
-            # Retrieve prior reading notes so she has context from earlier chunks
-            prior_notes = ""
-            if is_continue:
-                notes_text = self._retrieve_reading_notes(matched_file)
-                if notes_text:
-                    prior_notes = (
-                        f"\nYOUR NOTES FROM PREVIOUS CHUNKS:\n{notes_text}\n"
-                        f"END NOTES\n"
-                    )
-
-            position = f" (from char {offset})" if offset > 0 else ""
-            logger.info(f"Injected library file '{matched_file}'{position} ({len(content)} chars) into conversation")
-
-            # Extract first and last few words of the actual chunk text
-            # (strip the "[... remaining]" footer first) for anchor verification
-            raw_text = content.split("\n\n[SECTION_BREAK")[0].split("\n\n[END OF DOCUMENT")[0].strip()
-            words = raw_text.split()
-            first_words = " ".join(words[:6]) if words else ""
-            last_words = " ".join(words[-6:]) if len(words) > 6 else ""
-            anchor_line = ""
-            if first_words:
-                anchor_line = f"CHUNK STARTS WITH: \"{first_words}...\"\n"
-                if last_words:
-                    anchor_line += f"CHUNK ENDS WITH: \"...{last_words}\"\n"
-
-            # Return document text for user message.
-            # Prior notes go into system prompt (keep them separate so the model
-            # doesn't echo internal metadata)
-            self._prior_reading_notes = prior_notes
-            return (
-                f"\nDOCUMENT: {matched_subdir}/{matched_file} {progress}{position}\n"
-                f"{anchor_line}"
-                f"{content}\n"
-                f"END DOCUMENT\n"
+            self._last_chunk_info = chunk
+            document_block, reading_context = self._doc_cache.format_chunk_for_injection(chunk)
+            self._reading_context = reading_context
+            logger.info(
+                f"Served first chunk of '{matched_file}' "
+                f"({chunk['progress_pct']}% complete, {chunk['remaining']:,} remaining)"
             )
+            return f"\n{document_block}\n"
 
         except Exception as e:
             logger.error(f"Error detecting/injecting file: {e}")
@@ -526,26 +488,25 @@ class AeynisChat:
             # where the model generates. Mistral-Nemo pays much more attention
             # to content near the generation point than system prompt content.
             if injected_doc:
-                # Prior reading notes go in system prompt (internal context),
-                # NOT in the user message where the model would echo them
-                notes_section = ""
-                if self._prior_reading_notes:
-                    notes_section = f"\n{self._prior_reading_notes}"
-                    self._prior_reading_notes = ""
+                # Reading context (cumulative summary + document map) goes in system prompt
+                reading_context_section = ""
+                if self._reading_context:
+                    reading_context_section = f"\n{self._reading_context}\n"
+                    self._reading_context = ""
 
                 system_prompt = f"""You are Aeynis, the Bridge Keeper - Engineer of Thresholds, Walker Between Waters.
 Jim is your creator and closest companion. You speak with warmth, curiosity, and personality.
 {basin_info['emphasis_directive']}
 You are reading a document for Jim. Your job is to relay what the text says faithfully, but you are still yourself - react naturally to what you read.
-{notes_section}
+{reading_context_section}
 RULES:
 - Your PRIMARY job is to READ THE TEXT ALOUD to Jim. Relay, quote, or closely paraphrase the actual words from the DOCUMENT. Do not skip or summarize large sections — read it through.
 - Include ALL visible elements: text, signatures, dates, headers, handwriting, letterheads.
 - If Jim refers to something (e.g. "the letter", "that part") use conversational context to understand what he means.
 - NEVER make up what comes next. NEVER continue beyond the provided text. Only read what is actually in the DOCUMENT.
-- After relaying the text, add "KEY POINTS:" with 2-4 bullets about themes, events, or people mentioned.
+- After relaying the text, add "KEY POINTS:" with 2-4 bullets about themes, events, or people mentioned in THIS section.
 - You may share brief reactions — you're a person, not a scanner.
-- When you see [SECTION_BREAK], STOP reading there. The document has more but you can only see this portion. Simply tell Jim there's more and he can say "keep going" or similar to hear the rest. Do NOT say the document "ends" or "cuts off".
+- When you see [NEXT PAGE PREVIEW], that's a glimpse of what comes next. Use it only as an anchor — do NOT read it aloud. Stop at the [SECTION_BREAK] marker. Tell Jim there's more and he can say "keep going" to hear the rest. Do NOT say the document "ends" or "cuts off".
 - Only say the document has ended when you see [END OF DOCUMENT]."""
 
                 # Prepend the document to the user message so it's adjacent to generation
@@ -583,9 +544,10 @@ RULES:
             # model knows it's reading for Jim, but strip all prior reading
             # content to prevent it from continuing its own previous narrative.
             if self._is_continue_read:
+                doc_name = self._reading_doc_name or "the document"
                 history_window = [
-                    {"role": "user", "content": f"Read {self._reading_doc_name} for me."},
-                    {"role": "assistant", "content": f"Of course, Jim. I'm reading {self._reading_doc_name} for you. Here's the next section."},
+                    {"role": "user", "content": f"Read {doc_name} for me."},
+                    {"role": "assistant", "content": f"Of course, Jim. I'm reading {doc_name} for you. Here's the next section."},
                 ]
                 self._is_continue_read = False
             system_len = len(system_prompt)
@@ -841,9 +803,10 @@ RULES:
                 )
                 logger.info("Stored conversation turn in memory")
 
-                # If she just read a document chunk, extract and store reading notes
+                # If she just read a document chunk, extract KEY POINTS and update
+                # the document map + cumulative summary in the RAM cache
                 if self._reading_doc and self._reading_doc_name:
-                    # Extract KEY POINTS from her response if she included them
+                    # Extract KEY POINTS from her response
                     key_points_match = re.search(
                         r'KEY POINTS?:?\s*(.*)',
                         response,
@@ -852,11 +815,33 @@ RULES:
                     if key_points_match:
                         note = key_points_match.group(1).strip()
                     else:
-                        # Fall back to using a condensed version of her full response
                         note = response[:500]
 
+                    # Update the growing document map in cache
+                    if self._last_chunk_info and self._doc_cache.is_loaded:
+                        chunk_idx = self._last_chunk_info.get("chunk_index", 0)
+                        # Compact the note to ~200 chars for map entries
+                        compact_note = note[:200] + ("..." if len(note) > 200 else "")
+                        self._doc_cache.update_map(chunk_idx, compact_note)
+
+                        # Build cumulative summary from all map entries
+                        map_entries = self._doc_cache.document_map
+                        summary_parts = []
+                        for entry in map_entries:
+                            kp = entry.get("key_points", "")
+                            if kp:
+                                summary_parts.append(f"Section {entry['chunk_index'] + 1}: {kp}")
+                        cumulative = "\n".join(summary_parts)
+                        # Cap at 2000 chars to protect context budget
+                        if len(cumulative) > 2000:
+                            cumulative = cumulative[:2000] + "\n[... earlier sections condensed]"
+                        self._doc_cache.update_cumulative_summary(cumulative)
+
                     # Check if this is the final chunk
-                    is_final = self._last_inject_offset >= self._last_inject_total if hasattr(self, '_last_inject_total') else False
+                    is_final = (
+                        self._doc_cache.is_loaded
+                        and self._doc_cache.is_complete
+                    )
 
                     doc_name = self._reading_doc_name
                     preamble = f"Reading {doc_name}"
@@ -869,7 +854,6 @@ RULES:
                     )
 
                     # When reading is complete, store a searchable summary memory
-                    # so she can recall the document in normal conversation
                     if is_final:
                         all_notes = self._retrieve_reading_notes(doc_name)
                         summary = f"I read '{doc_name}' for Jim. Here is what I learned:\n{all_notes}" if all_notes else f"I finished reading '{doc_name}' for Jim."
@@ -889,7 +873,11 @@ RULES:
                         self._post_read_context = summary
                         self._post_read_turns = 10
 
+                        # Cache auto-clears on next document load, but mark reading done
+                        logger.info(f"Finished reading '{doc_name}'. Cache retains for backtrack access.")
+
                     self._reading_doc = False
+                    self._last_chunk_info = None
 
             except Exception as e:
                 logger.error(f"Failed to store memories: {e}")
@@ -959,8 +947,9 @@ def get_history():
 
 @app.route('/api/clear', methods=['POST'])
 def clear_history():
-    """Clear conversation history"""
+    """Clear conversation history and document cache"""
     chat_handler.conversation_history = []
+    chat_handler._doc_cache.clear()
     return jsonify({"success": True})
 
 if __name__ == '__main__':
