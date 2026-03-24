@@ -696,7 +696,7 @@ class AeynisChat:
                 user_message = f"""{injected_image}
 Jim says: {user_message}
 
-Share what you see — your raw impression first, then what you recognize. React naturally."""
+Tell Jim what you see in this image in your own words. Do not echo the data labels above — just describe the image naturally, like you're looking at it together."""
             elif injected_doc:
                 # Reading context (cumulative summary + document map) goes in system prompt
                 reading_context_section = ""
