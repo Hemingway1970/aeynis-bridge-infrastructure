@@ -17,6 +17,7 @@ import requests
 
 from aeynis_library_api import library_bp, init_library, get_library
 from document_cache import DocumentCache
+from image_viewer_api import images_bp, init_image_viewer, get_image_viewer
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -28,6 +29,9 @@ CORS(app)  # Allow Lux's frontend to connect
 # Register the Library blueprint and initialize with default path
 app.register_blueprint(library_bp)
 init_library()  # Creates ~/AeynisLibrary with 50GB quota
+
+# Register the Image Viewer blueprint
+app.register_blueprint(images_bp)
 
 # Backend URLs
 KOBOLD_URL = "http://localhost:5001"
@@ -64,6 +68,10 @@ class AeynisChat:
 
         # Track the last chunk for map updates after response
         self._last_chunk_info: Optional[Dict] = None
+
+        # Image viewer integration
+        self._viewing_image = False       # True when an image perception was injected this turn
+        self._viewing_image_name = ""     # Filename being viewed
         logger.info("Aeynis Chat Backend initialized")
     
     async def retrieve_relevant_memories(self, query: str, n_results: int = MAX_CONTEXT_MEMORIES) -> List[Dict]:
@@ -257,6 +265,119 @@ class AeynisChat:
                 if len(query) > 2:
                     return query
         return None
+
+    def _detect_and_inject_image(self, user_message: str) -> str:
+        """Detect image viewing commands and inject perception into context.
+
+        Handles:
+          - "show me [folder]", "open [folder] images", "what's in the family folder"
+          - "next image", "previous image", "go back"
+          - "show me [filename]"
+          - Image navigation while a folder is open
+
+        Returns formatted image perception block for user message, or empty string.
+        """
+        try:
+            viewer = get_image_viewer()
+            msg_lower = user_message.lower().strip()
+
+            # ── Navigation commands (when a folder is already open) ────
+            if viewer.is_open:
+                # Next image
+                if re.search(r'\b(next|forward|advance)\b', msg_lower) and \
+                   re.search(r'\b(image|photo|picture|pic|one)\b', msg_lower):
+                    if viewer.next_image():
+                        perception = viewer.view_current()
+                        if perception:
+                            self._viewing_image = True
+                            self._viewing_image_name = perception.get("filename", "")
+                            return f"\n{viewer.format_perception_for_chat(perception)}\n"
+                    return "\n[Already at the last image in this folder.]\n"
+
+                # Previous image
+                if re.search(r'\b(prev|previous|back|prior|last)\b', msg_lower) and \
+                   re.search(r'\b(image|photo|picture|pic|one)\b', msg_lower):
+                    if viewer.prev_image():
+                        perception = viewer.view_current()
+                        if perception:
+                            self._viewing_image = True
+                            self._viewing_image_name = perception.get("filename", "")
+                            return f"\n{viewer.format_perception_for_chat(perception)}\n"
+                    return "\n[Already at the first image in this folder.]\n"
+
+                # Short affirmatives while viewing → next image (like "continue" in reading)
+                short_next = ["next", "keep going", "more", "go on", "continue",
+                              "another", "what else", "show me more"]
+                if any(kw in msg_lower for kw in short_next) and len(msg_lower.split()) <= 6:
+                    if viewer.next_image():
+                        perception = viewer.view_current()
+                        if perception:
+                            self._viewing_image = True
+                            self._viewing_image_name = perception.get("filename", "")
+                            return f"\n{viewer.format_perception_for_chat(perception)}\n"
+                    return "\n[That's the last image in this folder.]\n"
+
+                # Close/stop viewing
+                if re.search(r'\b(close|stop|done|finish|exit)\b.*\b(view|image|photo|picture|folder)\b', msg_lower) or \
+                   re.search(r'\b(view|image|photo|picture|folder)\b.*\b(close|stop|done|finish|exit)\b', msg_lower):
+                    viewer.close_session()
+                    return "\n[Image viewing session closed.]\n"
+
+                # Jump to specific image by name
+                show_match = re.search(r'show\s+(?:me\s+)?["\']?([^"\']+?)["\']?\s*$', msg_lower)
+                if show_match:
+                    target = show_match.group(1).strip()
+                    if viewer.jump_to_filename(target):
+                        perception = viewer.view_current()
+                        if perception:
+                            self._viewing_image = True
+                            self._viewing_image_name = perception.get("filename", "")
+                            return f"\n{viewer.format_perception_for_chat(perception)}\n"
+
+            # ── Open folder commands ──────────────────────────────────
+            folder_patterns = [
+                r"(?:show|open|look\s+at|view|browse)\s+(?:me\s+)?(?:the\s+)?(?:images?\s+(?:in|from)\s+)?[\"']?(\w[\w\s-]*?)[\"']?\s*(?:folder|images?|photos?|pictures?|pics?)?$",
+                r"what(?:'s| is)\s+in\s+(?:the\s+)?[\"']?(\w[\w\s-]*?)[\"']?\s*(?:folder|images?|photos?)?$",
+                r"(?:let(?:'s| us)\s+)?(?:look\s+at|see|view)\s+(?:the\s+)?[\"']?(\w[\w\s-]*?)[\"']?\s*(?:folder|images?|photos?|pictures?)?$",
+            ]
+
+            for pattern in folder_patterns:
+                m = re.search(pattern, msg_lower)
+                if m:
+                    folder_name = m.group(1).strip()
+                    # Try to match against available folders
+                    folders = viewer.list_folders()
+                    matched = None
+                    for f in folders:
+                        if f["name"].lower() == folder_name.lower():
+                            matched = f
+                            break
+                        if folder_name.lower() in f["name"].lower():
+                            matched = f
+                            break
+
+                    if matched:
+                        result = viewer.open_folder(matched["path"])
+                        if result.get("success"):
+                            # Auto-view first image
+                            perception = viewer.view_current()
+                            if perception:
+                                self._viewing_image = True
+                                self._viewing_image_name = perception.get("filename", "")
+                                header = f"[Opened folder '{matched['name']}' — {result['image_count']} images]\n"
+                                return f"\n{header}{viewer.format_perception_for_chat(perception)}\n"
+                    else:
+                        # List available folders
+                        if folders:
+                            listing = ", ".join(f["name"] + f" ({f['image_count']})" for f in folders)
+                            return f"\n[No folder matching '{folder_name}'. Available: {listing}]\n"
+                        return f"\n[No image folders found in {viewer.list_folders.__self__.__class__.__name__}. Place images in ~/AeynisLibrary/images/]\n"
+
+            return ""
+
+        except Exception as e:
+            logger.error(f"Error in image command detection: {e}")
+            return ""
 
     def _detect_and_inject_file_content(self, user_message: str) -> str:
         """If the user message references a file in the library, serve it from RAM cache.
@@ -483,11 +604,26 @@ class AeynisChat:
             # Check if user is referencing a library file and inject its content
             injected_doc = self._detect_and_inject_file_content(user_message)
 
+            # Check if user is requesting image viewing
+            injected_image = ""
+            if not injected_doc:
+                injected_image = self._detect_and_inject_image(user_message)
+
             # When a document is injected, use a minimal system prompt and
             # put the document text in the USER message so it's right next to
             # where the model generates. Mistral-Nemo pays much more attention
             # to content near the generation point than system prompt content.
-            if injected_doc:
+            if injected_image:
+                # Image viewing mode — use the image viewer's system prompt
+                viewer = get_image_viewer()
+                system_prompt = viewer.build_viewing_system_prompt(basin_info['emphasis_directive'])
+
+                # Prepend the image perception to the user message
+                user_message = f"""{injected_image}
+Jim says: {user_message}
+
+Share what you see — your raw impression first, then what you recognize. React naturally."""
+            elif injected_doc:
                 # Reading context (cumulative summary + document map) goes in system prompt
                 reading_context_section = ""
                 if self._reading_context:
@@ -879,6 +1015,23 @@ RULES:
                     self._reading_doc = False
                     self._last_chunk_info = None
 
+                # If she just viewed an image, store a viewing memory
+                if self._viewing_image and self._viewing_image_name:
+                    img_name = self._viewing_image_name
+                    # Compact her response for memory storage
+                    img_note = response[:500] if len(response) > 500 else response
+                    requests.post(
+                        f"{MCP_MEMORY_URL}/api/memories",
+                        json={
+                            "content": f"Viewed image '{img_name}': {img_note}",
+                            "tags": ["aeynis", "image_viewing", img_name],
+                        },
+                        timeout=5,
+                    )
+                    logger.info(f"Stored image viewing memory for '{img_name}'")
+                    self._viewing_image = False
+                    self._viewing_image_name = ""
+
             except Exception as e:
                 logger.error(f"Failed to store memories: {e}")
 
@@ -947,9 +1100,13 @@ def get_history():
 
 @app.route('/api/clear', methods=['POST'])
 def clear_history():
-    """Clear conversation history and document cache"""
+    """Clear conversation history, document cache, and image viewer session"""
     chat_handler.conversation_history = []
     chat_handler._doc_cache.clear()
+    try:
+        get_image_viewer().close_session()
+    except Exception:
+        pass
     return jsonify({"success": True})
 
 if __name__ == '__main__':
@@ -957,6 +1114,10 @@ if __name__ == '__main__':
     logger.info(f"KoboldCpp: {KOBOLD_URL}")
     logger.info(f"Augustus: {AUGUSTUS_URL}")
     logger.info(f"Memory: {MCP_MEMORY_URL}")
-    
+
+    # Initialize image viewer with backend URLs
+    init_image_viewer(kobold_url=KOBOLD_URL, memory_url=MCP_MEMORY_URL)
+    logger.info("Image Viewer: initialized")
+
     # Run with Flask
     app.run(host='0.0.0.0', port=5555, debug=False)
