@@ -778,7 +778,9 @@
             const data = await response.json();
 
             // If the backend opened/navigated the image viewer, sync the panel
-            if (data.image_viewer && data.image_viewer.is_open) {
+            // BUT don't auto-open the viewer when the image will be shown inline in chat
+            // (the viewer panel gets in the way of the conversation)
+            if (data.image_viewer && data.image_viewer.is_open && !data.image_viewer.image_in_response) {
                 syncViewerPanel(data.image_viewer);
             }
 

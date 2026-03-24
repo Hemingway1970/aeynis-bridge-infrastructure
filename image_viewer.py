@@ -140,9 +140,63 @@ class VLMPerception:
 
     def __init__(self, kobold_url: str = "http://localhost:5001"):
         self.kobold_url = kobold_url
+        self._multimodal_supported: Optional[bool] = None  # Cached after first check
+
+    def check_multimodal_support(self) -> bool:
+        """Check if KoboldCpp has a multimodal model loaded.
+
+        Without multimodal support, the 'images' field is silently ignored
+        and the text-only model hallucinates a description from the prompt alone.
+        """
+        if self._multimodal_supported is not None:
+            return self._multimodal_supported
+
+        try:
+            # KoboldCpp /api/extra/version includes multimodal capability info
+            resp = requests.get(f"{self.kobold_url}/api/extra/version", timeout=5)
+            if resp.status_code == 200:
+                info = resp.json()
+                # Check for vision/multimodal flags in version info
+                if info.get("vision") or info.get("multimodal"):
+                    self._multimodal_supported = True
+                    logger.info("KoboldCpp multimodal support confirmed")
+                    return True
+
+            # Fallback: check the model name for known VLM identifiers
+            resp = requests.get(f"{self.kobold_url}/api/v1/model", timeout=5)
+            if resp.status_code == 200:
+                model_info = resp.json()
+                model_name = model_info.get("result", "").lower()
+                vlm_keywords = ["llava", "moondream", "bakllava", "obsidian",
+                                "minicpm", "internvl", "qwen-vl", "cogvlm",
+                                "bunny", "imp-v1", "nanollava"]
+                if any(kw in model_name for kw in vlm_keywords):
+                    self._multimodal_supported = True
+                    logger.info(f"VLM model detected: {model_name}")
+                    return True
+                else:
+                    self._multimodal_supported = False
+                    logger.warning(
+                        f"KoboldCpp model '{model_name}' is not a known VLM. "
+                        f"Image perception will be unavailable. Load a multimodal "
+                        f"model (Llava, Moondream2, etc.) with --mmproj for vision support."
+                    )
+                    return False
+
+            logger.warning("Could not determine KoboldCpp multimodal capability")
+            self._multimodal_supported = False
+            return False
+
+        except Exception as e:
+            logger.warning(f"Multimodal capability check failed: {e}")
+            self._multimodal_supported = False
+            return False
 
     def _vlm_query(self, image_b64: str, prompt: str, max_length: int = 500) -> str:
         """Send an image + text prompt to KoboldCpp's multimodal endpoint."""
+        if not self.check_multimodal_support():
+            return ""
+
         try:
             payload = {
                 "prompt": prompt,
@@ -211,11 +265,16 @@ class VLMPerception:
         result = self._vlm_query(image_b64, prompt, max_length=60)
         return result[:140] if result else ""
 
-    def two_pass_perceive(self, filepath: str) -> Dict:
+    def two_pass_perceive(self, filepath: str) -> Optional[Dict]:
         """Full two-pass perception of an image file.
 
         Returns dict with raw_perception, identified_elements, and metadata.
+        Returns None if VLM multimodal support is unavailable.
         """
+        if not self.check_multimodal_support():
+            logger.warning("Skipping VLM perception — no multimodal model loaded")
+            return None
+
         image_b64 = _encode_image_base64(filepath)
 
         # Pass 1: Raw observation
@@ -461,6 +520,29 @@ class ImageViewer:
         if prev:
             logger.info(f"Closed image session (was '{os.path.basename(prev)}')")
 
+    def clear_perception_cache(self, folder_path: Optional[str] = None) -> int:
+        """Delete all .meta.json sidecar files in a folder (or current folder).
+
+        Use this to purge hallucinated VLM perceptions so they can be re-run
+        with a proper multimodal model.  Returns count of files deleted.
+        """
+        target = folder_path or self._folder
+        if not target or not os.path.isdir(target):
+            return 0
+
+        count = 0
+        for f in os.listdir(target):
+            if f.endswith(".meta.json"):
+                try:
+                    os.remove(os.path.join(target, f))
+                    count += 1
+                except OSError as e:
+                    logger.warning(f"Failed to delete sidecar {f}: {e}")
+
+        if count:
+            logger.info(f"Cleared {count} cached perceptions from '{os.path.basename(target)}'")
+        return count
+
     # ── Navigation ──────────────────────────────────────────────────
 
     def next_image(self) -> bool:
@@ -534,6 +616,25 @@ class ImageViewer:
 
         # Extract EXIF
         exif = _extract_exif(filepath)
+
+        if perception is None:
+            # VLM not available — return image metadata without perception
+            # Don't save a sidecar (no point caching empty perception)
+            metadata = {
+                "raw_perception": "",
+                "identified_elements": "",
+                "vlm_unavailable": True,
+                "pattern_resonance": [],
+                "exif_data": exif,
+                "viewing_timestamp": datetime.now().isoformat(),
+                "synthesis_notes": "",
+                "filename": filename,
+                "folder": self.folder_name,
+                "position": self._position,
+                "total": len(self._images),
+            }
+            self._current_metadata = metadata
+            return metadata
 
         # Detect pattern resonance with her reading
         resonances = detect_pattern_resonance(
@@ -633,6 +734,15 @@ class ImageViewer:
         total = perception.get("total", 0)
 
         parts.append(f"IMAGE: {filename} [{pos}/{total}]")
+
+        # If VLM is unavailable, say so clearly
+        if perception.get("vlm_unavailable"):
+            parts.append(
+                "\n[VLM PERCEPTION UNAVAILABLE: KoboldCpp is not running a multimodal model. "
+                "The image is displayed for you but no visual description is available. "
+                "Load a VLM (Llava, Moondream2) with --mmproj for image perception.]"
+            )
+            return "\n".join(parts)
 
         # Pass 1: Raw observation
         raw = perception.get("raw_perception", "")

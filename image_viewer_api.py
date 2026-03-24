@@ -238,6 +238,20 @@ def close_session():
     return jsonify({"success": True})
 
 
+@images_bp.route("/images/clear-cache", methods=["POST"])
+def clear_perception_cache():
+    """Delete all .meta.json sidecar files to purge bad VLM perceptions.
+
+    Body (optional):
+      folder_path: str  - Specific folder to clear. Defaults to current folder.
+    """
+    viewer = get_image_viewer()
+    data = request.get_json(silent=True) or {}
+    folder_path = data.get("folder_path")
+    count = viewer.clear_perception_cache(folder_path)
+    return jsonify({"success": True, "cleared": count})
+
+
 @images_bp.route("/images/status", methods=["GET"])
 def viewer_status():
     """Get current viewer state."""
