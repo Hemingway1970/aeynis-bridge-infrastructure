@@ -7,6 +7,7 @@ Wires together mcp-memory-service, Augustus basins, and KoboldCpp for interactiv
 import asyncio
 import json
 import logging
+import os
 import re
 from datetime import datetime
 from typing import Dict, List, Any, Optional
@@ -18,6 +19,7 @@ import requests
 from aeynis_library_api import library_bp, init_library, get_library
 from document_cache import DocumentCache
 from image_viewer_api import images_bp, init_image_viewer, get_image_viewer
+from image_viewer import IMAGES_ROOT
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -72,6 +74,7 @@ class AeynisChat:
         # Image viewer integration
         self._viewing_image = False       # True when an image perception was injected this turn
         self._viewing_image_name = ""     # Filename being viewed
+        self._images_root = IMAGES_ROOT   # For building serve URLs in responses
         logger.info("Aeynis Chat Backend initialized")
     
     async def retrieve_relevant_memories(self, query: str, n_results: int = MAX_CONTEXT_MEMORIES) -> List[Dict]:
@@ -1038,11 +1041,27 @@ RULES:
             # 4. Evaluate and update basins
             await self.evaluate_and_update_basins(user_message, response)
             
-            return {
+            # Include image viewer state so the frontend can sync the viewer panel
+            result = {
                 "success": True,
                 "response": response,
                 "timestamp": datetime.now().isoformat()
             }
+
+            viewer = get_image_viewer()
+            if viewer.is_open:
+                result["image_viewer"] = {
+                    "is_open": True,
+                    "folder": viewer.folder_name,
+                    "position": viewer.position,
+                    "total": viewer.image_count,
+                    "current_image": viewer.current_filename,
+                }
+                if viewer.current_filepath:
+                    rel_path = os.path.relpath(viewer.current_filepath, self._images_root)
+                    result["image_viewer"]["serve_url"] = f"/images/serve/{rel_path}"
+
+            return result
             
         except Exception as e:
             logger.error(f"Error handling message: {e}")
@@ -1068,10 +1087,14 @@ async def submit_message():
         result = await chat_handler.handle_message(user_message)
         
         if result['success']:
-            return jsonify({
+            resp = {
                 "response": result['response'],
                 "timestamp": result['timestamp']
-            })
+            }
+            # Pass through image viewer state so frontend can sync the viewer panel
+            if 'image_viewer' in result:
+                resp['image_viewer'] = result['image_viewer']
+            return jsonify(resp)
         else:
             return jsonify({"error": result['error']}), 500
             

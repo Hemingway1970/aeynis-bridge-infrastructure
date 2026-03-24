@@ -592,6 +592,25 @@
         .file-link:hover {
             opacity: 0.85;
         }
+
+        /* Image thumbnail in chat messages */
+        .chat-image-thumb {
+            max-width: 200px;
+            max-height: 150px;
+            border-radius: 8px;
+            margin: 8px 0 4px 0;
+            cursor: pointer;
+            transition: opacity 0.2s;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+        }
+        .chat-image-thumb:hover {
+            opacity: 0.85;
+        }
+        .chat-image-caption {
+            font-size: 12px;
+            color: #a0a0b0;
+            margin-bottom: 6px;
+        }
     </style>
 </head>
 <body>
@@ -617,6 +636,7 @@
                 <button id="imgPrev">&larr; Prev</button>
                 <span class="image-counter" id="imageCounter">0/0</span>
                 <button id="imgNext">Next &rarr;</button>
+                <button id="imgDiscuss" title="Discuss this image in chat" style="background:linear-gradient(135deg,#667eea,#764ba2);">💬 Discuss</button>
                 <button id="imgClose" style="background:#e94560;">Close</button>
             </div>
             <div class="image-display" id="imageDisplay">
@@ -752,7 +772,25 @@
             }
 
             const data = await response.json();
+
+            // If the backend opened/navigated the image viewer, sync the panel
+            if (data.image_viewer && data.image_viewer.is_open) {
+                syncViewerPanel(data.image_viewer);
+            }
+
             return data.response;
+        }
+
+        // Sync the viewer panel when the chat backend triggers an image view
+        function syncViewerPanel(viewerState) {
+            // Auto-open the viewer panel if it isn't already
+            if (!imageViewerOpen) {
+                imagePanel.classList.add('open');
+                imageViewerOpen = true;
+            }
+            // Show nav and load the current image from the viewer API
+            imageNav.style.display = 'flex';
+            loadCurrentImage();
         }
 
         async function handleSend() {
@@ -991,6 +1029,84 @@
             imageNav.style.display = 'none';
             loadImageFolders();
         });
+
+        // "Discuss" button — sends the current image to chat so Aeynis can talk about it
+        document.getElementById('imgDiscuss').addEventListener('click', async () => {
+            if (isProcessing) return;
+            try {
+                const res = await fetch(`${BACKEND}/images/discuss`, { method: 'POST' });
+                const data = await res.json();
+                if (data.error) {
+                    setStatus('No image to discuss', true);
+                    return;
+                }
+                // Show a thumbnail + filename in chat as the "user" message
+                const caption = `Let's look at this one: ${data.filename} [${data.position + 1}/${data.total}]`;
+                addImageMessage('user', caption, data.serve_url);
+
+                // Send to backend as a chat message so Aeynis responds
+                isProcessing = true;
+                sendBtn.disabled = true;
+                messageInput.disabled = true;
+                showThinking();
+                setStatus('Aeynis is looking at the photo...');
+
+                const chatMsg = `I'm looking at ${data.filename}. What do you see?`;
+                conversationHistory.push({ role: 'user', content: chatMsg });
+
+                const response = await sendToBackend(chatMsg);
+                removeThinking();
+                addMessage('assistant', response);
+                conversationHistory.push({ role: 'assistant', content: response });
+                setStatus('Ready');
+            } catch (err) {
+                removeThinking();
+                setStatus('Error: ' + err.message, true);
+            } finally {
+                isProcessing = false;
+                sendBtn.disabled = false;
+                messageInput.disabled = false;
+                messageInput.focus();
+            }
+        });
+
+        // Helper: add a message with an image thumbnail to chat
+        function addImageMessage(role, caption, serveUrl) {
+            const msgDiv = document.createElement('div');
+            msgDiv.className = `message ${role}`;
+
+            const label = document.createElement('div');
+            label.className = 'message-label';
+            label.textContent = role === 'user' ? 'You' : 'Aeynis';
+
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'message-content';
+
+            if (serveUrl) {
+                const img = document.createElement('img');
+                img.src = `${BACKEND}${serveUrl}`;
+                img.className = 'chat-image-thumb';
+                img.alt = caption;
+                // Click thumbnail to open/focus viewer panel
+                img.addEventListener('click', () => {
+                    if (!imageViewerOpen) {
+                        imagePanel.classList.add('open');
+                        imageViewerOpen = true;
+                    }
+                });
+                contentDiv.appendChild(img);
+                contentDiv.appendChild(document.createElement('br'));
+            }
+
+            const text = document.createElement('span');
+            text.textContent = caption;
+            contentDiv.appendChild(text);
+
+            msgDiv.appendChild(label);
+            msgDiv.appendChild(contentDiv);
+            chatArea.appendChild(msgDiv);
+            chatArea.scrollTop = chatArea.scrollHeight;
+        }
 
         async function loadImageFolders() {
             try {

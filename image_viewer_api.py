@@ -251,6 +251,37 @@ def viewer_status():
     })
 
 
+@images_bp.route("/images/discuss", methods=["POST"])
+def discuss_current():
+    """Return the current image's perception formatted for chat injection.
+
+    The frontend can use this to send a message to chat that includes
+    the image context, bridging the viewer panel and the conversation.
+    """
+    viewer = get_image_viewer()
+
+    if not viewer.is_open:
+        return jsonify({"error": "No folder open"}), 400
+
+    perception = viewer.view_current()
+    if not perception:
+        return jsonify({"error": "No image available"}), 404
+
+    chat_block = viewer.format_perception_for_chat(perception)
+    serve_url = ""
+    if viewer.current_filepath:
+        rel_path = os.path.relpath(viewer.current_filepath, IMAGES_ROOT)
+        serve_url = f"/images/serve/{rel_path}"
+
+    return jsonify({
+        "filename": perception.get("filename", ""),
+        "chat_block": chat_block,
+        "serve_url": serve_url,
+        "position": viewer.position,
+        "total": viewer.image_count,
+    })
+
+
 @images_bp.route("/images/serve/<path:filepath>", methods=["GET"])
 def serve_image(filepath):
     """Serve a raw image file for display in the browser.
