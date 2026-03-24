@@ -575,7 +575,7 @@ class AeynisChat:
             logger.error(f"Error detecting/injecting file: {e}")
             return ""
 
-    async def generate_response(self, user_message: str, context: str) -> str:
+    async def generate_response(self, user_message: str, context: str, include_image: bool = False) -> str:
         """Generate response using KoboldCpp"""
         try:
             # Build the prompt with Aeynis identity + basin context + memories + conversation
@@ -611,6 +611,19 @@ class AeynisChat:
             injected_image = ""
             if not injected_doc:
                 injected_image = self._detect_and_inject_image(user_message)
+
+            # If the frontend explicitly requested image context (e.g. Discuss button),
+            # force-inject the current image's perception even if the message text
+            # didn't match a navigation command.
+            if not injected_image and not injected_doc and include_image:
+                viewer = get_image_viewer()
+                if viewer.is_open:
+                    perception = viewer.view_current()
+                    if perception:
+                        self._viewing_image = True
+                        self._viewing_image_name = perception.get("filename", "")
+                        injected_image = f"\n{viewer.format_perception_for_chat(perception)}\n"
+                        logger.info(f"Force-injected image perception for '{self._viewing_image_name}'")
 
             # When a document is injected, use a minimal system prompt and
             # put the document text in the USER message so it's right next to
@@ -887,7 +900,7 @@ RULES:
         except Exception as e:
             logger.error(f"Local basin decay failed: {e}")
     
-    async def handle_message(self, user_message: str) -> Dict[str, Any]:
+    async def handle_message(self, user_message: str, include_image: bool = False) -> Dict[str, Any]:
         """Main message handling pipeline"""
         try:
             # Guard against excessively long user input that would blow context
@@ -908,7 +921,7 @@ RULES:
             memory_context = "\n".join([m.get('content', '') for m in memories])
 
             # 2. Generate response with KoboldCpp
-            response = await self.generate_response(user_message, memory_context)
+            response = await self.generate_response(user_message, memory_context, include_image=include_image)
             
             # 3. Update conversation history (with overflow protection)
             # Use original message, not the doc-injected version, to keep history clean
@@ -1079,12 +1092,13 @@ async def submit_message():
     try:
         data = request.json
         user_message = data.get('message', '')
-        
+        include_image = data.get('include_image', False)
+
         if not user_message:
             return jsonify({"error": "No message provided"}), 400
-        
+
         # Handle the message
-        result = await chat_handler.handle_message(user_message)
+        result = await chat_handler.handle_message(user_message, include_image=include_image)
         
         if result['success']:
             resp = {

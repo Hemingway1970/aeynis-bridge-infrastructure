@@ -760,11 +760,14 @@
             return prompt;
         }
 
-        async function sendToBackend(userMessage) {
+        async function sendToBackend(userMessage, includeImage = false) {
+            const payload = { message: userMessage };
+            if (includeImage) payload.include_image = true;
+
             const response = await fetch('http://localhost:5555/api/submit', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message: userMessage })
+                body: JSON.stringify(payload)
             });
 
             if (!response.ok) {
@@ -1054,7 +1057,7 @@
                 const chatMsg = `I'm looking at ${data.filename}. What do you see?`;
                 conversationHistory.push({ role: 'user', content: chatMsg });
 
-                const response = await sendToBackend(chatMsg);
+                const response = await sendToBackend(chatMsg, true);
                 removeThinking();
                 addMessage('assistant', response);
                 conversationHistory.push({ role: 'assistant', content: response });
