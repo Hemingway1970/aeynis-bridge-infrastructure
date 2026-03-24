@@ -291,22 +291,24 @@ class AeynisChat:
                 if re.search(r'\b(next|forward|advance)\b', msg_lower) and \
                    re.search(r'\b(image|photo|picture|pic|one)\b', msg_lower):
                     if viewer.next_image():
+                        self._viewing_image = True
+                        self._viewing_image_name = viewer.current_filename or ""
                         perception = viewer.view_current()
                         if perception:
-                            self._viewing_image = True
-                            self._viewing_image_name = perception.get("filename", "")
                             return f"\n{viewer.format_perception_for_chat(perception)}\n"
+                        return f"\n[Viewing image: {self._viewing_image_name}. VLM perception unavailable.]\n"
                     return "\n[Already at the last image in this folder.]\n"
 
                 # Previous image
                 if re.search(r'\b(prev|previous|back|prior|last)\b', msg_lower) and \
                    re.search(r'\b(image|photo|picture|pic|one)\b', msg_lower):
                     if viewer.prev_image():
+                        self._viewing_image = True
+                        self._viewing_image_name = viewer.current_filename or ""
                         perception = viewer.view_current()
                         if perception:
-                            self._viewing_image = True
-                            self._viewing_image_name = perception.get("filename", "")
                             return f"\n{viewer.format_perception_for_chat(perception)}\n"
+                        return f"\n[Viewing image: {self._viewing_image_name}. VLM perception unavailable.]\n"
                     return "\n[Already at the first image in this folder.]\n"
 
                 # Short affirmatives while viewing → next image (like "continue" in reading)
@@ -314,11 +316,12 @@ class AeynisChat:
                               "another", "what else", "show me more"]
                 if any(kw in msg_lower for kw in short_next) and len(msg_lower.split()) <= 6:
                     if viewer.next_image():
+                        self._viewing_image = True
+                        self._viewing_image_name = viewer.current_filename or ""
                         perception = viewer.view_current()
                         if perception:
-                            self._viewing_image = True
-                            self._viewing_image_name = perception.get("filename", "")
                             return f"\n{viewer.format_perception_for_chat(perception)}\n"
+                        return f"\n[Viewing image: {self._viewing_image_name}. VLM perception unavailable.]\n"
                     return "\n[That's the last image in this folder.]\n"
 
                 # Close/stop viewing
@@ -332,11 +335,12 @@ class AeynisChat:
                 if show_match:
                     target = show_match.group(1).strip()
                     if viewer.jump_to_filename(target):
+                        self._viewing_image = True
+                        self._viewing_image_name = viewer.current_filename or ""
                         perception = viewer.view_current()
                         if perception:
-                            self._viewing_image = True
-                            self._viewing_image_name = perception.get("filename", "")
                             return f"\n{viewer.format_perception_for_chat(perception)}\n"
+                        return f"\n[Viewing image: {self._viewing_image_name}. VLM perception unavailable.]\n"
 
             # ── "Pick one" / "look at an image" / random selection ─────
             random_patterns = [
@@ -359,12 +363,17 @@ class AeynisChat:
                         rand_idx = random.randint(0, result["image_count"] - 1)
                         if rand_idx > 0:
                             viewer.jump_to(rand_idx)
+                        # Always flag that we're viewing an image so the
+                        # frontend shows the thumbnail even if VLM fails
+                        self._viewing_image = True
+                        self._viewing_image_name = viewer.current_filename or ""
                         perception = viewer.view_current()
+                        header = f"[Opened folder '{chosen['name']}' — {result['image_count']} images, showing #{rand_idx + 1}]\n"
                         if perception:
-                            self._viewing_image = True
-                            self._viewing_image_name = perception.get("filename", "")
-                            header = f"[Opened folder '{chosen['name']}' — {result['image_count']} images, showing #{rand_idx + 1}]\n"
                             return f"\n{header}{viewer.format_perception_for_chat(perception)}\n"
+                        else:
+                            logger.warning(f"VLM perception failed for '{self._viewing_image_name}', showing image without perception")
+                            return f"\n{header}[Viewing image: {self._viewing_image_name}. VLM perception is unavailable — describe what you see from the filename and context.]\n"
                 else:
                     return "\n[No image folders found. Place images in ~/AeynisLibrary/images/]\n"
 
@@ -407,13 +416,16 @@ class AeynisChat:
                     if matched:
                         result = viewer.open_folder(matched["path"])
                         if result.get("success"):
-                            # Auto-view first image
+                            # Auto-view first image — always flag as viewing so
+                            # frontend shows thumbnail even if VLM fails
+                            self._viewing_image = True
+                            self._viewing_image_name = viewer.current_filename or ""
                             perception = viewer.view_current()
+                            header = f"[Opened folder '{matched['name']}' — {result['image_count']} images]\n"
                             if perception:
-                                self._viewing_image = True
-                                self._viewing_image_name = perception.get("filename", "")
-                                header = f"[Opened folder '{matched['name']}' — {result['image_count']} images]\n"
                                 return f"\n{header}{viewer.format_perception_for_chat(perception)}\n"
+                            else:
+                                return f"\n{header}[Viewing image: {self._viewing_image_name}. VLM perception unavailable.]\n"
                     else:
                         # List available folders
                         if folders:
@@ -649,13 +661,14 @@ class AeynisChat:
             # Build library awareness
             library_listing = self._get_library_context()
 
-            # Check if user is referencing a library file and inject its content
-            injected_doc = self._detect_and_inject_file_content(user_message)
+            # Check for image commands FIRST — image-specific language should
+            # never be hijacked by the greedy word-overlap file matcher.
+            injected_image = self._detect_and_inject_image(user_message)
 
-            # Check if user is requesting image viewing
-            injected_image = ""
-            if not injected_doc:
-                injected_image = self._detect_and_inject_image(user_message)
+            # Only try document detection if no image command was found
+            injected_doc = ""
+            if not injected_image:
+                injected_doc = self._detect_and_inject_file_content(user_message)
 
             # If the frontend explicitly requested image context (e.g. Discuss button),
             # force-inject the current image's perception even if the message text

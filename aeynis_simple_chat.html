@@ -595,6 +595,7 @@
 
         /* Image thumbnail in chat messages */
         .chat-image-thumb {
+            display: block;
             max-width: 200px;
             max-height: 150px;
             border-radius: 8px;
@@ -1098,13 +1099,23 @@
                 const img = document.createElement('img');
                 img.src = `${BACKEND}${serveUrl}`;
                 img.className = 'chat-image-thumb';
-                img.alt = caption;
+                img.alt = 'Image thumbnail';
                 // Click thumbnail to open/focus viewer panel
                 img.addEventListener('click', () => {
                     if (!imageViewerOpen) {
                         imagePanel.classList.add('open');
                         imageViewerOpen = true;
                     }
+                });
+                img.addEventListener('error', () => {
+                    img.style.display = 'none';
+                    const errNote = document.createElement('div');
+                    errNote.style.cssText = 'color:#ff6b6b;font-size:12px;margin:4px 0;';
+                    errNote.textContent = `[Image failed to load: ${serveUrl}]`;
+                    contentDiv.insertBefore(errNote, contentDiv.firstChild);
+                });
+                img.addEventListener('load', () => {
+                    console.log('Image loaded:', img.src);
                 });
                 contentDiv.appendChild(img);
                 contentDiv.appendChild(document.createElement('br'));
