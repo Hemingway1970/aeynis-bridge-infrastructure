@@ -781,7 +781,8 @@
                 syncViewerPanel(data.image_viewer);
             }
 
-            return data.response;
+            // Return full data so caller can check for inline images
+            return data;
         }
 
         // Sync the viewer panel when the chat backend triggers an image view
@@ -812,10 +813,18 @@
             setStatus('Thinking...');
 
             try {
-                const response = await sendToBackend(message);
+                const data = await sendToBackend(message);
                 removeThinking();
-                addMessage('assistant', response);
-                conversationHistory.push({ role: 'assistant', content: response });
+                const responseText = data.response;
+
+                // If Aeynis just viewed an image, show it inline in chat
+                if (data.image_viewer && data.image_viewer.image_in_response && data.image_viewer.serve_url) {
+                    const imgName = data.image_viewer.current_image || 'image';
+                    addImageMessage('assistant', responseText, data.image_viewer.serve_url);
+                } else {
+                    addMessage('assistant', responseText);
+                }
+                conversationHistory.push({ role: 'assistant', content: responseText });
                 setStatus('✓ Ready');
             } catch (error) {
                 removeThinking();
@@ -1057,10 +1066,10 @@
                 const chatMsg = `I'm looking at ${data.filename}. What do you see?`;
                 conversationHistory.push({ role: 'user', content: chatMsg });
 
-                const response = await sendToBackend(chatMsg, true);
+                const backendData = await sendToBackend(chatMsg, true);
                 removeThinking();
-                addMessage('assistant', response);
-                conversationHistory.push({ role: 'assistant', content: response });
+                addMessage('assistant', backendData.response);
+                conversationHistory.push({ role: 'assistant', content: backendData.response });
                 setStatus('Ready');
             } catch (err) {
                 removeThinking();

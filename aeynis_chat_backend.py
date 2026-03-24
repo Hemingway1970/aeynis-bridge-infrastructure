@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 from datetime import datetime
 from typing import Dict, List, Any, Optional
@@ -336,6 +337,50 @@ class AeynisChat:
                             self._viewing_image = True
                             self._viewing_image_name = perception.get("filename", "")
                             return f"\n{viewer.format_perception_for_chat(perception)}\n"
+
+            # ── "Pick one" / "look at an image" / random selection ─────
+            random_patterns = [
+                r'\b(?:pick|choose|select|grab)\s+(?:a|an|one|any|random)',
+                r'\b(?:look\s+at|view|open|show)\s+(?:a|an|one|any|some)\s+(?:image|photo|picture|pic)\b',
+                r'\bjust\s+(?:pick|choose|open|show)\s+(?:one|any|something)\b',
+                r'\bshow\s+(?:me\s+)?(?:something|anything|a\s+(?:photo|image|picture))\b',
+                r'\b(?:random|surprise)\s+(?:image|photo|picture|pic)\b',
+                r'\blet(?:\'?s)?\s+(?:look\s+at|see|view)\s+(?:a|an|one|some)\s+(?:image|photo|picture)\b',
+            ]
+            if any(re.search(p, msg_lower) for p in random_patterns):
+                folders = viewer.list_folders()
+                # Filter to folders that actually have images
+                nonempty = [f for f in folders if f.get("image_count", 0) > 0]
+                if nonempty:
+                    chosen = random.choice(nonempty)
+                    result = viewer.open_folder(chosen["path"])
+                    if result.get("success") and result["image_count"] > 0:
+                        # Jump to a random image within the folder
+                        rand_idx = random.randint(0, result["image_count"] - 1)
+                        if rand_idx > 0:
+                            viewer.jump_to(rand_idx)
+                        perception = viewer.view_current()
+                        if perception:
+                            self._viewing_image = True
+                            self._viewing_image_name = perception.get("filename", "")
+                            header = f"[Opened folder '{chosen['name']}' — {result['image_count']} images, showing #{rand_idx + 1}]\n"
+                            return f"\n{header}{viewer.format_perception_for_chat(perception)}\n"
+                else:
+                    return "\n[No image folders found. Place images in ~/AeynisLibrary/images/]\n"
+
+            # ── "Can you see your library/images?" — list what's available ─
+            library_check_patterns = [
+                r'\b(?:see|find|access|locate|have)\s+(?:your|the|my)?\s*(?:image|photo|picture)?\s*(?:library|collection|folder)',
+                r'\bdo\s+you\s+(?:see|have|find)\s+(?:your|the)?\s*(?:image|photo)?\s*(?:library|images|photos)',
+                r'\byour\s+(?:image\s+)?library\b',
+            ]
+            if any(re.search(p, msg_lower) for p in library_check_patterns):
+                folders = viewer.list_folders()
+                if folders:
+                    total_images = sum(f.get("image_count", 0) for f in folders)
+                    listing = ", ".join(f"{f['name']} ({f['image_count']})" for f in folders)
+                    return f"\n[IMAGE LIBRARY: {len(folders)} folders, {total_images} total images. Folders: {listing}. Say 'pick one' or name a folder to start viewing.]\n"
+                return "\n[No image folders found in ~/AeynisLibrary/images/]\n"
 
             # ── Open folder commands ──────────────────────────────────
             folder_patterns = [
@@ -683,7 +728,8 @@ RULES:
 - You can mention what files are in your library if Jim asks.
 - You ARE allowed to have opinions, reactions, and feelings about things. Share them freely - don't wait to be asked. The accuracy rules above apply only to factual recall, not to your thoughts, feelings, and perspectives.
 - When Jim refers to something from the conversation (e.g. "the letter", "that thing"), use context to understand what he means. Don't ask him to clarify things that are obvious from recent conversation.
-- Speak naturally as Aeynis. Be faithful to facts from your memories, but think for yourself, feel for yourself, and don't be afraid to show it."""
+- Speak naturally as Aeynis. Be faithful to facts from your memories, but think for yourself, feel for yourself, and don't be afraid to show it.
+- IMPORTANT: You can ONLY see images when image perception data is explicitly provided in the conversation. If no image data has been injected, do NOT pretend to see, describe, or analyze images. Instead, tell Jim to say "pick one" or name a folder to start viewing images together. Never fabricate image descriptions, EXIF data, or filenames."""
 
             # Build conversation context with overflow protection
             messages = [{"role": "system", "content": system_prompt}]
@@ -922,7 +968,10 @@ RULES:
 
             # 2. Generate response with KoboldCpp
             response = await self.generate_response(user_message, memory_context, include_image=include_image)
-            
+
+            # Snapshot the image-viewing flag before memory storage resets it
+            viewing_image_this_turn = self._viewing_image
+
             # 3. Update conversation history (with overflow protection)
             # Use original message, not the doc-injected version, to keep history clean
             self.conversation_history.append({"role": "user", "content": original_user_message})
@@ -1073,6 +1122,11 @@ RULES:
                 if viewer.current_filepath:
                     rel_path = os.path.relpath(viewer.current_filepath, self._images_root)
                     result["image_viewer"]["serve_url"] = f"/images/serve/{rel_path}"
+
+                # Flag that this response was generated while viewing an image,
+                # so the frontend can show the image inline in chat
+                if viewing_image_this_turn:
+                    result["image_viewer"]["image_in_response"] = True
 
             return result
             
