@@ -688,12 +688,26 @@ class AeynisChat:
             # where the model generates. Mistral-Nemo pays much more attention
             # to content near the generation point than system prompt content.
             if injected_image:
-                # Image viewing mode — use the image viewer's system prompt
                 viewer = get_image_viewer()
-                system_prompt = viewer.build_viewing_system_prompt(basin_info['emphasis_directive'])
 
-                # Prepend the image perception to the user message
-                user_message = f"""{injected_image}
+                if "[VLM PERCEPTION UNAVAILABLE" in injected_image:
+                    # VLM can't see images — don't ask her to describe what she sees
+                    system_prompt = f"""You are Aeynis, the Bridge Keeper - Engineer of Thresholds, Walker Between Waters.
+Jim is your creator and closest companion. You speak with warmth, curiosity, and personality.
+{basin_info['emphasis_directive']}"""
+                    user_message = f"""Jim is showing you an image, but your vision system is not available right now.
+The current model (Mistral-Nemo) cannot process images — a multimodal model like Llava or Moondream2 is needed.
+
+Jim says: {user_message}
+
+Be honest with Jim — tell him you cannot see the image right now because the vision model isn't loaded. \
+Do NOT make up or hallucinate a description. You can see the filename but nothing else."""
+                else:
+                    # Image viewing mode — use the image viewer's system prompt
+                    system_prompt = viewer.build_viewing_system_prompt(basin_info['emphasis_directive'])
+
+                    # Prepend the image perception to the user message
+                    user_message = f"""{injected_image}
 Jim says: {user_message}
 
 Tell Jim what you see in this image in your own words. Do not echo the data labels above — just describe the image naturally, like you're looking at it together."""
