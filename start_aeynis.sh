@@ -61,9 +61,10 @@ wait_for_service() {
 # 0. Initialize Aeynis Library directory
 LIBRARY_DIR="$HOME/AeynisLibrary"
 echo "[0] Initializing Aeynis Library..."
-mkdir -p "$LIBRARY_DIR/originals" "$LIBRARY_DIR/reviews" "$LIBRARY_DIR/imports"
+mkdir -p "$LIBRARY_DIR/originals" "$LIBRARY_DIR/reviews" "$LIBRARY_DIR/imports" \
+         "$LIBRARY_DIR/writings" "$LIBRARY_DIR/calendar"
 echo "  Library root: $LIBRARY_DIR"
-echo "  Subdirs: originals/ reviews/ imports/"
+echo "  Subdirs: originals/ reviews/ imports/ writings/ calendar/"
 echo ""
 
 # 1. Start KoboldCpp (port 5001)

@@ -255,6 +255,8 @@ class AeynisLibrary:
         os.makedirs(os.path.join(self.root, "reviews"), exist_ok=True)
         os.makedirs(os.path.join(self.root, "originals"), exist_ok=True)
         os.makedirs(os.path.join(self.root, "imports"), exist_ok=True)
+        os.makedirs(os.path.join(self.root, "writings"), exist_ok=True)
+        os.makedirs(os.path.join(self.root, "calendar"), exist_ok=True)
 
         logger.info(f"AeynisLibrary initialized at {self.root} "
                      f"(limit: {size_limit_gb} GB)")

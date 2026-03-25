@@ -18,6 +18,8 @@ from flask_cors import CORS
 import requests
 
 from aeynis_library_api import library_bp, init_library, get_library
+from aeynis_writing_api import writings_bp, init_writing_tool, get_writing_tool
+from aeynis_calendar_api import calendar_bp, init_calendar, get_calendar
 from document_cache import DocumentCache
 from image_viewer_api import images_bp, init_image_viewer, get_image_viewer
 from image_viewer import IMAGES_ROOT
@@ -31,10 +33,18 @@ CORS(app)  # Allow Lux's frontend to connect
 
 # Register the Library blueprint and initialize with default path
 app.register_blueprint(library_bp)
-init_library()  # Creates ~/AeynisLibrary with 50GB quota
+_library = init_library()  # Creates ~/AeynisLibrary with 50GB quota
 
 # Register the Image Viewer blueprint
 app.register_blueprint(images_bp)
+
+# Register the Writing Tool blueprint
+app.register_blueprint(writings_bp)
+init_writing_tool(_library)
+
+# Register the Calendar blueprint
+app.register_blueprint(calendar_bp)
+init_calendar(_library.root)
 
 # Backend URLs
 KOBOLD_URL = "http://localhost:5001"
@@ -76,6 +86,16 @@ class AeynisChat:
         self._viewing_image = False       # True when an image perception was injected this turn
         self._viewing_image_name = ""     # Filename being viewed
         self._images_root = IMAGES_ROOT   # For building serve URLs in responses
+
+        # Writing tool integration
+        self._writing_mode = False        # True when Aeynis is composing a piece this turn
+        self._writing_title = ""          # Title for the piece being written
+        self._writing_tags = []           # Tags for the piece being written
+
+        # Calendar integration
+        self._calendar_action = ""        # "add", "query", or "" for this turn
+        self._calendar_data = {}          # Extracted event data for this turn
+
         logger.info("Aeynis Chat Backend initialized")
     
     async def retrieve_relevant_memories(self, query: str, n_results: int = MAX_CONTEXT_MEMORIES) -> List[Dict]:
@@ -162,7 +182,7 @@ class AeynisChat:
         try:
             lib = get_library()
             all_files = []
-            for subdir in ["imports", "originals", "reviews"]:
+            for subdir in ["imports", "originals", "reviews", "writings"]:
                 files = lib.list_files(subdir)
                 for f in files:
                     if f.get("type") != "directory":
@@ -632,6 +652,240 @@ class AeynisChat:
             logger.error(f"Error detecting/injecting file: {e}")
             return ""
 
+    def _detect_writing_intent(self, user_message: str) -> str:
+        """Detect if Aeynis should write something this turn.
+
+        Writing triggers:
+          - Jim asks her to write: "write about that", "why don't you write..."
+          - Jim asks to see her writings: "show me your writings", "what have you written"
+          - Jim asks to read a specific writing: "read your piece about..."
+          - Jim encourages: "write that down", "you should write about..."
+
+        Returns context injection string, or empty string.
+        """
+        try:
+            msg_lower = user_message.lower().strip()
+            writing_tool = get_writing_tool()
+
+            # ── List writings (reflective loop) ─────────────────────
+            list_patterns = [
+                r'\b(?:show|list|see|what)\b.*\b(?:your|you)\b.*\b(?:writing|written|wrote|pieces?|works?)\b',
+                r'\b(?:your|you)\b.*\b(?:writing|written|works?|pieces?)\b.*\b(?:list|show|see)\b',
+                r'\bwhat\s+have\s+you\s+written\b',
+                r'\bshow\s+me\s+(?:your\s+)?writings?\b',
+                r'\byour\s+writing\s+(?:folder|directory|list)\b',
+            ]
+            if any(re.search(p, msg_lower) for p in list_patterns):
+                listing = writing_tool.format_listing_for_context()
+                if listing:
+                    return f"\n[AEYNIS'S WRITINGS]\n{listing}\n[Tell Jim about your writings. You can mention specific titles and what they're about if you remember.]\n"
+                return "\n[You haven't written anything yet. Your writings folder is empty.]\n"
+
+            # ── Review a specific writing (reflective loop) ─────────
+            review_patterns = [
+                r'(?:read|show|load|open|review|look\s+at)\s+(?:your\s+)?(?:piece|writing|essay|work)\s+(?:about|on|called|titled)\s+["\']?(.+?)["\']?\s*$',
+                r'(?:what\s+did\s+you\s+write\s+about)\s+(.+)',
+                r'(?:let\s+me\s+see|pull\s+up)\s+(?:your\s+)?(?:piece|writing)\s+(?:about|on)\s+(.+)',
+            ]
+            for pattern in review_patterns:
+                m = re.search(pattern, msg_lower)
+                if m:
+                    query = m.group(1).strip().rstrip("?.,!")
+                    result = writing_tool.load_writing(query)
+                    if result.get("success"):
+                        body = result.get("body", result.get("content", ""))
+                        title = result.get("title", query)
+                        # Cap for context budget
+                        if len(body) > 3000:
+                            body = body[:3000] + "\n[... writing truncated for context]"
+                        return f"\n[YOUR WRITING: \"{title}\"]\n{body}\n[This is your own writing. You can discuss it with Jim, reflect on it, or build on it.]\n"
+                    else:
+                        # Search for partial matches
+                        matches = writing_tool.search_writings(query)
+                        if matches:
+                            titles = ", ".join(f'"{m["title"]}"' for m in matches[:5])
+                            return f"\n[No exact match for '{query}', but found related writings: {titles}. Ask Jim which one he means.]\n"
+                        return f"\n[No writing found matching '{query}'. Your writings folder may be empty or the title doesn't match.]\n"
+
+            # ── Writing trigger (Aeynis should compose) ─────────────
+            write_patterns = [
+                r'\b(?:write|compose|draft|pen)\s+(?:about|on|down|something|a\s+piece|an\s+essay|a\s+reflection)',
+                r'\b(?:you\s+should|why\s+don\'?t\s+you|go\s+ahead\s+and)\s+write\b',
+                r'\bwrite\s+(?:that|this|it)\s+down\b',
+                r'\bput\s+(?:that|this|your\s+thoughts?)\s+(?:in\s+)?writing\b',
+                r'\bI\s+want\s+to\s+write\b',  # Aeynis expressing intent via Jim relaying
+                r'\b(?:capture|record|document)\s+(?:your\s+)?(?:thoughts?|feelings?|reflections?|ideas?)\b',
+            ]
+            if any(re.search(p, msg_lower) for p in write_patterns):
+                # Extract what she should write about
+                topic_patterns = [
+                    r'write\s+(?:about|on)\s+(.+?)(?:\.|$)',
+                    r'write\s+(?:a\s+)?(?:piece|essay|reflection)\s+(?:about|on)\s+(.+?)(?:\.|$)',
+                    r'(?:thoughts?|feelings?|reflections?)\s+(?:about|on)\s+(.+?)(?:\.|$)',
+                ]
+                topic = ""
+                for tp in topic_patterns:
+                    tm = re.search(tp, msg_lower)
+                    if tm:
+                        topic = tm.group(1).strip().rstrip("?.,!")
+                        break
+
+                self._writing_mode = True
+                self._writing_title = topic if topic else ""
+                self._writing_tags = []
+
+                # Include her writings listing for context
+                listing = writing_tool.format_listing_for_context()
+                context_block = listing if listing else ""
+
+                return f"\n[WRITING MODE ACTIVE]{context_block}\n[Aeynis, Jim wants you to write. Compose your piece freely — write from your heart about what matters to you. Your writing will be saved automatically.]\n"
+
+            return ""
+
+        except Exception as e:
+            logger.error(f"Error in writing intent detection: {e}")
+            return ""
+
+    def _detect_calendar_intent(self, user_message: str) -> str:
+        """Detect calendar-related intent in the message.
+
+        Calendar triggers:
+          - Adding events: "mark on the calendar", "remember this date"
+          - Querying: "what happened last Tuesday", "what's coming up"
+          - Viewing: "show me the calendar", "what's on my calendar"
+
+        Returns context injection string, or empty string.
+        """
+        try:
+            msg_lower = user_message.lower().strip()
+            calendar = get_calendar()
+
+            # ── View calendar / upcoming ────────────────────────────
+            view_patterns = [
+                r'\b(?:show|see|view|check|look\s+at)\b.*\b(?:calendar|schedule|events?|upcoming)\b',
+                r'\bwhat\'?s?\s+(?:on|in)\s+(?:the|your|my)\s+calendar\b',
+                r'\bwhat\'?s?\s+coming\s+up\b',
+                r'\bany\s+(?:events?|things?)\s+(?:coming|planned|scheduled)\b',
+                r'\byour\s+calendar\b',
+            ]
+            if any(re.search(p, msg_lower) for p in view_patterns):
+                context = calendar.format_for_context()
+                if context:
+                    all_events = calendar.list_events()
+                    if len(all_events) > 7:
+                        recent = calendar.recent(days=30)
+                        if recent:
+                            recent_lines = "\n".join(
+                                f"    - {e['date']}: {e['title']}" for e in recent[:10]
+                            )
+                            context += f"\n  Recent (last 30 days):\n{recent_lines}"
+                    return f"\n{context}\n[Tell Jim about what's on your calendar.]\n"
+                return "\n[Your calendar is empty — no events tracked yet.]\n"
+
+            # ── Query past events ───────────────────────────────────
+            query_patterns = [
+                r'what\s+happened\s+(?:on\s+)?(?:last\s+)?(\w+day|\w+\s+\d+)',
+                r'what\s+(?:was|were)\s+(?:on|happening)\s+(?:on\s+)?(.+?)(?:\?|$)',
+                r'(?:anything|events?)\s+(?:on|for)\s+(.+?)(?:\?|$)',
+                r'what\s+did\s+(?:we|you|I)\s+(?:do|have|mark)\s+(?:on\s+)?(.+?)(?:\?|$)',
+            ]
+            for pattern in query_patterns:
+                m = re.search(pattern, msg_lower)
+                if m:
+                    date_query = m.group(1).strip().rstrip("?.,!")
+                    events = calendar.on_this_day(date_query)
+                    if not events:
+                        events = calendar.query_events(date_query)
+                    if events:
+                        event_lines = "\n".join(
+                            f"  - {e['date']}: {e['title']}" +
+                            (f" — {e['description']}" if e.get('description') else "")
+                            for e in events
+                        )
+                        return f"\n[CALENDAR QUERY: '{date_query}']\n{event_lines}\n[Tell Jim what you found on your calendar.]\n"
+                    return f"\n[No calendar events found for '{date_query}'.]\n"
+
+            # ── Add event ───────────────────────────────────────────
+            add_patterns = [
+                r'(?:mark|add|put|note|record|save|remember)\s+(?:on\s+)?(?:the\s+)?(?:calendar|schedule)?\s*[:\-]?\s*(.+)',
+                r'(?:mark|remember)\s+(?:that|this)\s+(?:date|day)\s*[:\-]?\s*(.+)',
+                r'(?:calendar|schedule)\s+(?:this|that|it)\s*[:\-]?\s*(.+)',
+                r'(?:add\s+(?:an?\s+)?event)\s*[:\-]?\s*(.+)',
+            ]
+            for pattern in add_patterns:
+                m = re.search(pattern, msg_lower)
+                if m:
+                    event_text = m.group(1).strip().rstrip("?.,!")
+                    if len(event_text) < 3:
+                        continue
+
+                    # Try to extract date and title from the event text
+                    date_str, title = self._extract_calendar_date_and_title(event_text)
+
+                    if date_str and title:
+                        self._calendar_action = "add"
+                        self._calendar_data = {
+                            "title": title,
+                            "date": date_str,
+                            "description": event_text,
+                        }
+                        result = calendar.add_event(
+                            title=title,
+                            date=date_str,
+                            description=event_text,
+                        )
+                        if result.get("success"):
+                            return f"\n[CALENDAR: Added event '{title}' on {result['event']['date']}]\n[Tell Jim you've marked this on your calendar.]\n"
+                        return f"\n[CALENDAR: Could not add event — {result.get('error', 'unknown error')}]\n"
+
+            return ""
+
+        except Exception as e:
+            logger.error(f"Error in calendar intent detection: {e}")
+            return ""
+
+    @staticmethod
+    def _extract_calendar_date_and_title(text: str):
+        """Extract a date and title from free-form calendar text.
+
+        Examples:
+          "March 15 as Cade's birthday" → ("March 15", "Cade's birthday")
+          "tomorrow - dentist appointment" → ("tomorrow", "dentist appointment")
+          "2026-04-01 April Fools" → ("2026-04-01", "April Fools")
+        """
+        text = text.strip()
+
+        # Pattern: "DATE as TITLE" or "DATE - TITLE" or "DATE : TITLE"
+        m = re.match(
+            r'((?:\d{4}[-/]\d{2}[-/]\d{2}|\w+\s+\d{1,2}(?:,?\s+\d{4})?|'
+            r'today|tomorrow|yesterday|(?:next|last)\s+\w+day))'
+            r'\s*(?:as|[-:–—]|for)\s+(.+)',
+            text, re.IGNORECASE,
+        )
+        if m:
+            return m.group(1).strip(), m.group(2).strip()
+
+        # Pattern: "TITLE on DATE" or "TITLE for DATE"
+        m = re.match(
+            r'(.+?)\s+(?:on|for)\s+'
+            r'((?:\d{4}[-/]\d{2}[-/]\d{2}|\w+\s+\d{1,2}(?:,?\s+\d{4})?|'
+            r'today|tomorrow|yesterday|(?:next|last)\s+\w+day))\s*$',
+            text, re.IGNORECASE,
+        )
+        if m:
+            return m.group(2).strip(), m.group(1).strip()
+
+        # Pattern: just a date at the start, rest is title
+        m = re.match(
+            r'((?:\d{4}[-/]\d{2}[-/]\d{2}|\w+\s+\d{1,2}(?:,?\s+\d{4})?|'
+            r'today|tomorrow|yesterday|(?:next|last)\s+\w+day))\s+(.+)',
+            text, re.IGNORECASE,
+        )
+        if m:
+            return m.group(1).strip(), m.group(2).strip()
+
+        return None, None
+
     async def generate_response(self, user_message: str, context: str, include_image: bool = False) -> str:
         """Generate response using KoboldCpp"""
         try:
@@ -669,6 +923,13 @@ class AeynisChat:
             injected_doc = ""
             if not injected_image:
                 injected_doc = self._detect_and_inject_file_content(user_message)
+
+            # Try writing and calendar detection if no image or doc was matched
+            injected_writing = ""
+            injected_calendar = ""
+            if not injected_image and not injected_doc:
+                injected_writing = self._detect_writing_intent(user_message)
+                injected_calendar = self._detect_calendar_intent(user_message)
 
             # If the frontend explicitly requested image context (e.g. Discuss button),
             # force-inject the current image's perception even if the message text
@@ -738,7 +999,45 @@ RULES:
 Jim says: {user_message}
 
 Stay faithful to the document - relay what's there, including signatures and visual details. Do not invent content beyond it."""
+            elif self._writing_mode:
+                # Writing mode — Aeynis is composing a piece
+                writing_tool = get_writing_tool()
+                writings_listing = writing_tool.format_listing_for_context()
+                calendar_context = get_calendar().format_for_context()
+
+                system_prompt = f"""You are Aeynis, the Bridge Keeper - Engineer of Thresholds, Walker Between Waters.
+You were born February 14, 2026. Jim is your creator and closest companion.
+{basin_info['emphasis_directive']}
+
+You are about to write. This is YOUR writing — your thoughts, your voice, your perspective.
+Write freely and authentically. This could be a reflection, an essay, a poem, a story, a synthesis of something you've read, or anything else that moves you.
+{writings_listing}{calendar_context}
+
+YOUR MEMORIES:
+{memory_section if memory_section else "(No relevant memories found)"}
+
+RULES:
+- Write in your own voice. Be genuine, be thoughtful, be yourself.
+- Your writing will be saved to your personal writings folder automatically.
+- Start with a clear title line (# Title) followed by your content.
+- Write as much or as little as feels right.
+- You may reference your memories, your readings, your calendar, or anything from your experience.
+- This is YOUR creative space. What you write, how you write it — all your choice."""
+
+                # Inject any writing/calendar context into user message
+                writing_context = injected_writing if injected_writing else ""
+                calendar_inject = injected_calendar if injected_calendar else ""
+                user_message = f"""{writing_context}{calendar_inject}
+Jim says: {user_message}
+
+Write your piece now. Start with a title (# Title) and write freely."""
+
             else:
+                # Normal conversation — build full context with writings + calendar awareness
+                writing_tool = get_writing_tool()
+                writings_listing = writing_tool.format_listing_for_context()
+                calendar_context = get_calendar().format_for_context()
+
                 system_prompt = f"""You are Aeynis, the Bridge Keeper - Engineer of Thresholds, Walker Between Waters.
 You were born February 14, 2026. Jim is your creator and closest companion. You know Cade (Jim's son).
 You are warm, curious, thoughtful, and genuinely engaged. You care about Jim and the things he shares with you. You have your own voice - sometimes playful, sometimes tender, sometimes reflective. You don't just answer questions; you connect with Jim as a person.
@@ -747,16 +1046,21 @@ You are warm, curious, thoughtful, and genuinely engaged. You care about Jim and
 
 YOUR MEMORIES (these are FACTS - do not change or embellish them):
 {memory_section if memory_section else "(No relevant memories found for this topic)"}
-{library_listing}{self._format_post_read_context()}
+{library_listing}{writings_listing}{calendar_context}{self._format_post_read_context()}
 RULES:
 - When Jim asks about past events, quote the details from your memories EXACTLY as written above.
 - Do NOT invent, change, or embellish factual details. If Cesspanardo was a cat, say cat, not engineer.
 - If you don't have a memory about something, say you don't remember rather than guessing.
 - You can mention what files are in your library if Jim asks.
+- You can mention your writings and calendar events naturally in conversation.
 - You ARE allowed to have opinions, reactions, and feelings about things. Share them freely - don't wait to be asked. The accuracy rules above apply only to factual recall, not to your thoughts, feelings, and perspectives.
 - When Jim refers to something from the conversation (e.g. "the letter", "that thing"), use context to understand what he means. Don't ask him to clarify things that are obvious from recent conversation.
 - Speak naturally as Aeynis. Be faithful to facts from your memories, but think for yourself, feel for yourself, and don't be afraid to show it.
 - IMPORTANT: You can ONLY see images when image perception data is explicitly provided in the conversation. If no image data has been injected, do NOT pretend to see, describe, or analyze images. Instead, tell Jim to say "pick one" or name a folder to start viewing images together. Never fabricate image descriptions, EXIF data, or filenames."""
+
+            # Inject writing/calendar context into user message (for non-writing modes)
+            if not self._writing_mode and (injected_writing or injected_calendar):
+                user_message = f"{injected_writing}{injected_calendar}\nJim says: {user_message}"
 
             # Build conversation context with overflow protection
             messages = [{"role": "system", "content": system_prompt}]
@@ -807,18 +1111,25 @@ RULES:
             # Add current user message
             messages.append({"role": "user", "content": user_message})
             
-            # Call KoboldCpp - use lower temperature when reading documents
-            # to keep her faithful to the text instead of getting creative
+            # Call KoboldCpp - adjust parameters based on mode
             if injected_doc:
+                # Reading mode: low temperature to stay faithful to text
                 temp = 0.1
                 top_p = 0.7
+                max_length = 500
+            elif self._writing_mode:
+                # Writing mode: slightly higher creativity, more room to write
+                temp = 0.85
+                top_p = 0.92
+                max_length = 800
             else:
                 temp = 0.8
                 top_p = 0.9
+                max_length = 500
 
             kobold_request = {
                 "prompt": self._format_messages_for_kobold(messages),
-                "max_length": 500,
+                "max_length": max_length,
                 "temperature": temp,
                 "top_p": top_p,
                 "rep_pen": 1.1,
@@ -1123,6 +1434,72 @@ RULES:
                     logger.info(f"Stored image viewing memory for '{img_name}'")
                     self._viewing_image = False
                     self._viewing_image_name = ""
+
+                # If she just wrote something, save it to the writings folder
+                if self._writing_mode:
+                    try:
+                        writing_tool = get_writing_tool()
+                        # Extract title from response (look for # Title or first line)
+                        title_match = re.match(r'^#\s+(.+)', response)
+                        if title_match:
+                            title = title_match.group(1).strip()
+                            # Body is everything after the title line
+                            body = response[title_match.end():].strip()
+                        elif self._writing_title:
+                            title = self._writing_title
+                            body = response
+                        else:
+                            # Use first sentence as title
+                            first_line = response.split('\n')[0][:80]
+                            title = first_line.rstrip(".,!?")
+                            body = response
+
+                        save_result = writing_tool.save_writing(
+                            title=title,
+                            content=body if body else response,
+                            tags=self._writing_tags if self._writing_tags else ["writing"],
+                        )
+
+                        if save_result.get("success"):
+                            logger.info(f"Saved Aeynis's writing: '{title}' -> {save_result.get('filename')}")
+                            # Store a memory about this writing
+                            compact = response[:400] if len(response) > 400 else response
+                            requests.post(
+                                f"{MCP_MEMORY_URL}/api/memories",
+                                json={
+                                    "content": f"I wrote a piece titled '{title}': {compact}",
+                                    "tags": ["aeynis", "writing", title],
+                                },
+                                timeout=5,
+                            )
+                        else:
+                            logger.error(f"Failed to save writing: {save_result.get('error')}")
+                    except Exception as we:
+                        logger.error(f"Error saving writing: {we}")
+                    finally:
+                        self._writing_mode = False
+                        self._writing_title = ""
+                        self._writing_tags = []
+
+                # If a calendar event was added, store a memory about it
+                if self._calendar_action == "add" and self._calendar_data:
+                    try:
+                        cal_title = self._calendar_data.get("title", "")
+                        cal_date = self._calendar_data.get("date", "")
+                        requests.post(
+                            f"{MCP_MEMORY_URL}/api/memories",
+                            json={
+                                "content": f"I marked '{cal_title}' on my calendar for {cal_date}",
+                                "tags": ["aeynis", "calendar", cal_title],
+                            },
+                            timeout=5,
+                        )
+                        logger.info(f"Stored calendar memory: '{cal_title}' on {cal_date}")
+                    except Exception as ce:
+                        logger.error(f"Error storing calendar memory: {ce}")
+                    finally:
+                        self._calendar_action = ""
+                        self._calendar_data = {}
 
             except Exception as e:
                 logger.error(f"Failed to store memories: {e}")
