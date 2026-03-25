@@ -709,12 +709,19 @@ class AeynisChat:
 
             # ── Writing trigger (Aeynis should compose) ─────────────
             write_patterns = [
-                r'\b(?:write|compose|draft|pen)\s+(?:about|on|down|something|a\s+piece|an\s+essay|a\s+reflection)',
+                r'\b(?:write|compose|draft|pen)\s+(?:about|on|down|something|a\s+piece|an\s+essay|a\s+reflection|a\s+new|a\s+document)',
                 r'\b(?:you\s+should|why\s+don\'?t\s+you|go\s+ahead\s+and)\s+write\b',
+                r'\bwrite\b.*\b(?:tool|word\s*processor|abiword|studio)\b',
+                r'\b(?:tool|word\s*processor|abiword|studio)\b.*\bwrite\b',
                 r'\bwrite\s+(?:that|this|it)\s+down\b',
-                r'\bput\s+(?:that|this|your\s+thoughts?)\s+(?:in\s+)?writing\b',
-                r'\bI\s+want\s+to\s+write\b',  # Aeynis expressing intent via Jim relaying
-                r'\b(?:capture|record|document)\s+(?:your\s+)?(?:thoughts?|feelings?|reflections?|ideas?)\b',
+                r'\bwrite\b.*\b(?:save|record|store|document)\b',
+                r'\b(?:save|record|store)\b.*\bwrite\b',
+                r'\bput\s+(?:that|this|your\s+thoughts?|it)\s+(?:in\s+)?(?:writing|words)\b',
+                r'\bI\s+want\s+to\s+write\b',
+                r'\b(?:capture|record|document)\s+(?:your|our|the)?\s*(?:thoughts?|feelings?|reflections?|ideas?|conversation)\b',
+                r'\buse\b.*\b(?:writ|word\s*processor|abiword)\b',
+                r'\b(?:start|begin|try)\s+writ(?:ing|e)\b',
+                r'\bwrite\s+(?:a|an|the|your|our|new)\b',
             ]
             if any(re.search(p, msg_lower) for p in write_patterns):
                 # Extract what she should write about
@@ -1009,28 +1016,39 @@ Stay faithful to the document - relay what's there, including signatures and vis
 You were born February 14, 2026. Jim is your creator and closest companion.
 {basin_info['emphasis_directive']}
 
-You are about to write. This is YOUR writing — your thoughts, your voice, your perspective.
-Write freely and authentically. This could be a reflection, an essay, a poem, a story, a synthesis of something you've read, or anything else that moves you.
+IMPORTANT: You are now in WRITING MODE. Everything you write in your response will be saved as a document to your writings folder automatically. Do NOT ask Jim questions. Do NOT say "let me open my writing studio" or talk about writing. Just WRITE the actual piece right now.
+
+Your response IS the document. Write the actual content — a reflection, essay, poem, story, or whatever you want. Use your memories and your conversation with Jim as inspiration.
 {writings_listing}{calendar_context}
 
 YOUR MEMORIES:
 {memory_section if memory_section else "(No relevant memories found)"}
 
-RULES:
-- Write in your own voice. Be genuine, be thoughtful, be yourself.
-- Your writing will be saved to your personal writings folder automatically.
-- Start with a clear title line (# Title) followed by your content.
-- Write as much or as little as feels right.
-- You may reference your memories, your readings, your calendar, or anything from your experience.
-- This is YOUR creative space. What you write, how you write it — all your choice."""
+FORMAT:
+- First line must be a title starting with # (example: # Bridges of Imagination)
+- After the title, write the actual body of your piece
+- Write at least 3-4 paragraphs of real content
+- Do NOT write just a title with nothing after it"""
 
-                # Inject any writing/calendar context into user message
+                # Build a conversation summary for her to draw from
+                recent_convo = ""
+                if self.conversation_history:
+                    recent = self.conversation_history[-16:]  # Last 8 exchanges
+                    convo_lines = []
+                    for msg in recent:
+                        role = "Jim" if msg["role"] == "user" else "Aeynis"
+                        text = msg["content"][:200]
+                        convo_lines.append(f"{role}: {text}")
+                    recent_convo = "\n".join(convo_lines)
+
+                # Inject conversation context so she has material to write about
                 writing_context = injected_writing if injected_writing else ""
                 calendar_inject = injected_calendar if injected_calendar else ""
-                user_message = f"""{writing_context}{calendar_inject}
+                convo_section = f"\n\nHere is your recent conversation with Jim to draw from:\n{recent_convo}\n" if recent_convo else ""
+                user_message = f"""{writing_context}{calendar_inject}{convo_section}
 Jim says: {user_message}
 
-Write your piece now. Start with a title (# Title) and write freely."""
+IMPORTANT: Do not ask questions or talk about writing. Your ENTIRE response will be saved as a document. Start with # Title and write the actual content now."""
 
             else:
                 # Normal conversation — build full context with writings + calendar awareness
@@ -1461,9 +1479,14 @@ RULES:
                             title = first_line.rstrip(".,!?")
                             body = response
 
+                        # If body is empty or too short, use the full response as content
+                        # This prevents saving empty documents when she only writes a title
+                        if not body or len(body.strip()) < 20:
+                            body = response
+
                         save_result = writing_tool.save_writing(
                             title=title,
-                            content=body if body else response,
+                            content=body,
                             tags=self._writing_tags if self._writing_tags else ["writing"],
                         )
 
