@@ -9,6 +9,7 @@ Endpoints:
   GET    /writings/read/<identifier>     - Load a specific writing
   POST   /writings/save                  - Save a new writing
   POST   /writings/update                - Append to an existing writing
+  POST   /writings/export                - Export a writing via AbiWord
   DELETE /writings/<identifier>          - Delete a writing
   GET    /writings/search?q=<query>      - Search writings by keyword
 """
@@ -86,6 +87,7 @@ def save_writing():
         title=title,
         content=content,
         tags=data.get("tags"),
+        export_format=data.get("export_format", ""),
     )
 
     if not result.get("success"):
@@ -112,6 +114,29 @@ def update_writing():
     result = tool.update_writing(identifier, additional)
     if not result.get("success"):
         return jsonify(result), 404 if "not found" in result.get("error", "").lower() else 500
+    return jsonify(result)
+
+
+@writings_bp.route("/writings/export", methods=["POST"])
+def export_writing():
+    """Export a writing to another format using AbiWord.
+
+    JSON body:
+      identifier:    str (required) - filename or title
+      target_format: str (required) - odt, pdf, html, doc, rtf, txt
+    """
+    data = request.json or {}
+    identifier = data.get("identifier")
+    target_format = data.get("target_format")
+
+    if not identifier or not target_format:
+        return jsonify({"error": "identifier and target_format are required"}), 400
+
+    tool = get_writing_tool()
+    result = tool.export_writing(identifier, target_format)
+    if not result.get("success"):
+        status = 404 if "not found" in result.get("error", "").lower() else 400
+        return jsonify(result), status
     return jsonify(result)
 
 
