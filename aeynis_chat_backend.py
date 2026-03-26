@@ -930,34 +930,27 @@ class AeynisChat:
             # Build the prompt with Aeynis identity + basin context + memories + conversation
             basin_info = await self.get_basin_context()
 
-            # Retrieve relevant memories
-            memories = await self.retrieve_relevant_memories(user_message)
+            # Retrieve relevant memories using an enriched query.
+            # Build the query from the current message PLUS recent conversation
+            # so memory search captures the full conversational context, not just
+            # the single latest message. This way she naturally recalls things
+            # discussed earlier without Jim having to say "check your memory."
+            memory_query = user_message
+            if self.conversation_history:
+                # Pull key phrases from the last few turns to enrich the search
+                recent_snippets = []
+                for msg in self.conversation_history[-6:]:
+                    snippet = msg["content"][:150]
+                    recent_snippets.append(snippet)
+                if recent_snippets:
+                    conversation_context = " | ".join(recent_snippets)
+                    # Combine: current message weighted first, then recent context
+                    memory_query = f"{user_message} | {conversation_context}"
+                    # Cap query length to avoid overwhelming the search
+                    if len(memory_query) > 1000:
+                        memory_query = memory_query[:1000]
 
-            # If the message is about remembering/recalling, do a broader search
-            # using recent conversation as additional queries to find what was discussed
-            recall_patterns = [
-                r'\b(?:remember|recall|forget|forgot|memory|check your memory)\b',
-                r'\b(?:do you|don\'?t you|can you)\s+remember\b',
-                r'\b(?:told you|said|mentioned)\s+(?:earlier|before|just now)\b',
-                r'\btheir\s+names\b',
-                r'\bwhat\s+(?:were|are)\s+(?:their|the)\s+names\b',
-            ]
-            if any(re.search(p, user_message.lower()) for p in recall_patterns):
-                # Search using recent conversation turns for better recall
-                extra_memories = []
-                seen_ids = {id(m) for m in memories}
-                recent_history = self.conversation_history[-10:]
-                for msg in recent_history:
-                    if msg["role"] == "user" and len(msg["content"]) > 10:
-                        extra = await self.retrieve_relevant_memories(msg["content"], n_results=5)
-                        for em in extra:
-                            if id(em) not in seen_ids:
-                                extra_memories.append(em)
-                                seen_ids.add(id(em))
-                # Merge, keeping original memories first
-                memories = memories + extra_memories[:10]
-                if extra_memories:
-                    logger.info(f"Recall mode: found {len(extra_memories)} additional memories from conversation context")
+            memories = await self.retrieve_relevant_memories(memory_query)
 
             memory_section = ""
             if memories:
