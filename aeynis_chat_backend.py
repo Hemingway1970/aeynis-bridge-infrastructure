@@ -75,6 +75,10 @@ class AeynisChat:
         self._reading_doc_name = ""       # Filename being read (for memory tagging)
         self._reading_context = ""        # Map + summary context for system prompt (set by _detect_and_inject)
 
+        # Reading idle tracking — auto-clear cache after conversation moves on
+        self._turns_since_last_read = 0   # Incremented each non-reading turn
+        self._reading_idle_limit = 3      # Clear cache after this many non-reading turns
+
         # Post-read follow-up support
         self._post_read_context = ""      # Summary of recently-read doc for follow-up questions
         self._post_read_turns = 0         # Turns remaining to show post-read context
@@ -472,20 +476,32 @@ class AeynisChat:
             lib = get_library()
             msg_lower = user_message.lower()
 
+            # ── Auto-expire reading cache after conversation moves on ──
+            if self._doc_cache.is_loaded and self._turns_since_last_read >= self._reading_idle_limit:
+                logger.info(f"Reading cache expired after {self._turns_since_last_read} idle turns — clearing '{self._doc_cache.filename}'")
+                self._doc_cache.clear()
+
             # ── Continue reading (next chunk from RAM cache) ─────────────
-            continue_keywords = ["continue", "keep", "read", "more", "next", "go on",
-                                 "go ahead", "carry on", "the rest", "what happen",
-                                 "and then", "please", "yes", "yeah", "yep", "sure",
-                                 "ok", "okay"]
+            # Strong reading keywords — require explicit reading intent
+            strong_read_kw = ["continue reading", "keep reading", "read on", "read more",
+                              "next page", "next section", "next part", "the rest",
+                              "what happens next", "carry on reading", "go on reading"]
+            # Weaker keywords — only valid if we were JUST reading (0 idle turns)
+            weak_read_kw = ["continue", "keep going", "go on", "go ahead",
+                            "carry on", "more", "and then"]
+            has_strong = any(kw in msg_lower for kw in strong_read_kw)
+            has_weak = (self._turns_since_last_read == 0
+                        and any(kw in msg_lower for kw in weak_read_kw))
             is_continue = (
                 self._doc_cache.is_loaded
                 and not self._doc_cache.is_complete
                 and len(msg_lower.split()) <= 12
-                and any(kw in msg_lower for kw in continue_keywords)
+                and (has_strong or has_weak)
             )
 
             if is_continue:
                 self._is_continue_read = True
+                self._turns_since_last_read = 0  # Reset idle counter
                 chunk = self._doc_cache.get_next_chunk()
                 if not chunk:
                     return ""
@@ -530,6 +546,11 @@ class AeynisChat:
             if not known_files:
                 return ""
 
+            # Check if message contains reading-intent words (needed for fuzzy matching)
+            reading_intent_words = {"read", "open", "look", "show", "file", "book",
+                                    "paper", "pdf", "document", "letter", "article"}
+            has_reading_intent = bool(msg_words & reading_intent_words)
+
             matched_file = None
             matched_subdir = None
 
@@ -560,25 +581,33 @@ class AeynisChat:
                         matched_subdir = subdir
                     continue
 
-                # Strategy 2: word overlap scoring
+                # Strategy 2: word overlap scoring (only if message shows reading intent)
+                # Require strong overlap to prevent casual conversation words
+                # from accidentally matching filenames
+                if not has_reading_intent:
+                    continue
                 fname_words = set(re.findall(r'[a-z]{2,}', stem_normalized)) - noise_words
                 if not fname_words:
                     continue
                 overlap = msg_words & fname_words
-                if len(overlap) >= 1:
-                    score = len(overlap) + len(overlap) / len(fname_words)
-                    fname_word_count = len(fname_words)
-                    if fname_word_count <= 2 and len(overlap) < fname_word_count:
-                        continue
-                    if fname_word_count > 2 and len(overlap) < 2:
-                        continue
-                    if score > best_score:
-                        best_score = score
-                        matched_file = original_name
-                        matched_subdir = subdir
+                fname_word_count = len(fname_words)
+                # Require at least 2 overlapping words, OR full match on short names
+                if fname_word_count <= 2 and len(overlap) < fname_word_count:
+                    continue
+                if fname_word_count > 2 and len(overlap) < 2:
+                    continue
+                # Also require overlap to cover a meaningful fraction of the filename
+                overlap_ratio = len(overlap) / fname_word_count
+                if overlap_ratio < 0.5:
+                    continue
+                score = len(overlap) + overlap_ratio
+                if score > best_score:
+                    best_score = score
+                    matched_file = original_name
+                    matched_subdir = subdir
 
-            # Strategy 3: check last assistant response
-            if not matched_file and self.conversation_history:
+            # Strategy 3: check last assistant response (only with reading intent)
+            if not matched_file and has_reading_intent and self.conversation_history:
                 last_msgs = [m for m in self.conversation_history[-2:]
                              if m["role"] == "assistant"]
                 if last_msgs:
@@ -618,6 +647,7 @@ class AeynisChat:
             if not matched_file:
                 logger.info(f"No library file matched in message. "
                             f"msg_words={msg_words}, known_files={list(known_files.keys())}")
+                self._turns_since_last_read += 1  # No doc served → increment idle
                 return ""
             logger.info(f"Matched library file '{matched_file}' in subdir '{matched_subdir}'")
 
@@ -639,6 +669,7 @@ class AeynisChat:
 
             self._reading_doc = True
             self._reading_doc_name = matched_file
+            self._turns_since_last_read = 0  # Reset idle counter — actively reading
             self._last_chunk_info = chunk
             document_block, reading_context = self._doc_cache.format_chunk_for_injection(chunk)
             self._reading_context = reading_context
@@ -930,6 +961,15 @@ class AeynisChat:
             injected_doc = ""
             if not injected_image:
                 injected_doc = self._detect_and_inject_file_content(user_message)
+            else:
+                # Image took priority → not reading, increment idle
+                self._turns_since_last_read += 1
+
+            # If no doc was injected either, count as non-reading turn
+            if not injected_doc and not injected_image:
+                # (idle counter already incremented inside _detect_and_inject_file_content
+                #  when no match found, but ensure it's set for image-priority case too)
+                pass
 
             # Try writing and calendar detection if no image or doc was matched
             injected_writing = ""
@@ -1094,14 +1134,24 @@ RULES:
             max_history = 6 if injected_doc else 8
             history_window = list(self.conversation_history[-max_history:])
 
-            # On "continue reading", keep only a short context anchor so the
-            # model knows it's reading for Jim, but strip all prior reading
-            # content to prevent it from continuing its own previous narrative.
+            # On "continue reading", provide a reading anchor but keep some
+            # real conversation context so Aeynis doesn't lose track of who
+            # she's talking to or what they were discussing.
             if self._is_continue_read:
                 doc_name = self._reading_doc_name or "the document"
-                history_window = [
-                    {"role": "user", "content": f"Read {doc_name} for me."},
-                    {"role": "assistant", "content": f"Of course, Jim. I'm reading {doc_name} for you. Here's the next section."},
+                # Keep 2 real history entries for conversational grounding,
+                # then add the reading anchor
+                real_context = list(self.conversation_history[-4:]) if self.conversation_history else []
+                # Strip any prior document injection from real context to save space
+                cleaned = []
+                for msg in real_context:
+                    content = msg["content"]
+                    if len(content) > 300:
+                        content = content[:300] + "..."
+                    cleaned.append({"role": msg["role"], "content": content})
+                history_window = cleaned + [
+                    {"role": "user", "content": f"Continue reading {doc_name} for me."},
+                    {"role": "assistant", "content": f"Of course, Jim. Here's the next section of {doc_name}."},
                 ]
                 self._is_continue_read = False
             system_len = len(system_prompt)
