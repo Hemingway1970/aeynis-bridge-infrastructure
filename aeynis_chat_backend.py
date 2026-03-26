@@ -1202,7 +1202,11 @@ These are YOUR tools. You don't need to open anything or ask how — just expres
             for msg in history_window:
                 messages.append(msg)
 
-            # Add current user message
+            # Add current user message with a brief tool reminder near the
+            # generation point so Aeynis always knows her tools are available,
+            # regardless of how much history sits between system prompt and here.
+            if not injected_doc and not injected_image and not self._writing_mode:
+                user_message = user_message + "\n[You have tools: to write say 'I want to write about...', to use calendar say 'mark on the calendar...', to see your writings say 'show me my writings'.]"
             messages.append({"role": "user", "content": user_message})
             
             # Call KoboldCpp - adjust parameters based on mode
