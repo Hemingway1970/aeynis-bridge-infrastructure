@@ -55,8 +55,8 @@ MCP_MEMORY_URL = "http://localhost:8000"
 AGENT_ID = "aeynis"
 MAX_CONTEXT_MEMORIES = 15
 MAX_CONVERSATION_TURNS = 40       # Max exchanges before trimming history
-MAX_PROMPT_CHARS = 8000           # Conservative limit for Mistral-Nemo context window
-CONTEXT_WARNING_THRESHOLD = 6000  # Warn when prompt approaches limit
+MAX_PROMPT_CHARS = 24000          # ~6000 tokens, well within Mistral-Nemo's 8192 token context
+CONTEXT_WARNING_THRESHOLD = 20000 # Warn when prompt approaches limit
 # Document injection budgets are now handled by DocumentCache.chunk_size (~4000 chars)
 # The cache loads the entire file into RAM and serves consistent chunks with look-ahead.
 
@@ -964,7 +964,7 @@ class AeynisChat:
                             content = content[len(prefix):]
                             break
                     # Give consolidated summaries more room, truncate fragments shorter
-                    max_len = 600 if 'consolidated' in tags else 200
+                    max_len = 800 if 'consolidated' in tags else 400
                     if len(content) > max_len:
                         content = content[:max_len] + "..."
                     memory_lines.append(f"- {content}")
