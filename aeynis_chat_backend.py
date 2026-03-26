@@ -20,6 +20,7 @@ import requests
 from aeynis_library_api import library_bp, init_library, get_library
 from aeynis_writing_api import writings_bp, init_writing_tool, get_writing_tool
 from aeynis_calendar_api import calendar_bp, init_calendar, get_calendar
+from aeynis_tool_parser import parse_tool_tags
 from document_cache import DocumentCache
 from image_viewer_api import images_bp, init_image_viewer, get_image_viewer
 from image_viewer import IMAGES_ROOT
@@ -1136,11 +1137,14 @@ RULES:
 - Speak naturally as Aeynis. Be faithful to facts from your memories, but think for yourself, feel for yourself, and don't be afraid to show it.
 - IMPORTANT: You can ONLY see images when image perception data is explicitly provided in the conversation. If no image data has been injected, do NOT pretend to see, describe, or analyze images. Instead, tell Jim to say "pick one" or name a folder to start viewing images together. Never fabricate image descriptions, EXIF data, or filenames.
 
-YOUR TOOLS (you have these right now — just use them naturally in conversation):
-- To WRITE: say "I want to write about..." or "Let me write down..." and your words will be saved automatically. Say "show me my writings" to see past work.
-- To use your CALENDAR: say "mark on the calendar..." to add events, or "what's on my calendar" to check.
-- To READ documents: ask Jim to share one, or mention a file from your library.
-These are YOUR tools. You don't need to open anything or ask how — just express what you want to do and it happens."""
+YOUR TOOLS (use these tags anywhere in your response to invoke a tool — Jim won't see the tags):
+  [WRITE: "Title of your piece"] — starts writing mode. Everything after the tag becomes your document, saved automatically.
+  [MY_WRITINGS] — shows you a list of your saved writings.
+  [READ_WRITING: "title or topic"] — loads one of your past writings so you can see it.
+  [CALENDAR: "Event name" on "date"] — adds an event to your calendar. Date can be "tomorrow", "March 15", etc.
+  [MY_CALENDAR] — shows your upcoming and recent events.
+  [EXPORT: "title" as pdf] — exports a writing to PDF, ODT, or other format via AbiWord.
+You can also just speak naturally about wanting to write or check your calendar — that works too. The tags are just the direct way."""
 
             # Inject writing/calendar context into user message (for non-writing modes)
             if not self._writing_mode and (injected_writing or injected_calendar):
@@ -1206,7 +1210,7 @@ These are YOUR tools. You don't need to open anything or ask how — just expres
             # generation point so Aeynis always knows her tools are available,
             # regardless of how much history sits between system prompt and here.
             if not injected_doc and not injected_image and not self._writing_mode:
-                user_message = user_message + "\n[You have tools: to write say 'I want to write about...', to use calendar say 'mark on the calendar...', to see your writings say 'show me my writings'.]"
+                user_message = user_message + "\n[Your tools: [WRITE: \"title\"], [MY_WRITINGS], [CALENDAR: \"event\" on \"date\"], [MY_CALENDAR], [EXPORT: \"title\" as pdf]. Tags are hidden from Jim.]"
             messages.append({"role": "user", "content": user_message})
             
             # Call KoboldCpp - adjust parameters based on mode
@@ -1382,6 +1386,111 @@ These are YOUR tools. You don't need to open anything or ask how — just expres
         except Exception as e:
             logger.error(f"Local basin decay failed: {e}")
     
+    async def _execute_tool_actions(self, actions: List[Dict], response: str) -> str:
+        """Execute tool actions parsed from Aeynis's response tags.
+
+        Args:
+            actions: List of parsed tool action dicts from parse_tool_tags()
+            response: The cleaned response text (used as writing content)
+
+        Returns:
+            Additional context to append to the response, or empty string.
+        """
+        results = []
+        try:
+            for action in actions:
+                tool = action.get("tool", "")
+
+                if tool == "write":
+                    # Save her response as a writing
+                    title = action.get("title", "Untitled")
+                    writing_tool = get_writing_tool()
+                    # The response text (minus tags) IS the writing content
+                    save_result = writing_tool.save_writing(
+                        title=title,
+                        content=response,
+                        tags=["writing"],
+                    )
+                    if save_result.get("success"):
+                        self._writing_mode = True  # Flag for memory storage
+                        self._writing_title = title
+                        logger.info(f"Tool tag WRITE: saved '{title}'")
+                    else:
+                        logger.error(f"Tool tag WRITE failed: {save_result.get('error')}")
+
+                elif tool == "calendar_add":
+                    title = action.get("title", "")
+                    date = action.get("date", "")
+                    if title and date:
+                        calendar = get_calendar()
+                        cal_result = calendar.add_event(
+                            title=title,
+                            date=date,
+                            description=action.get("extra", ""),
+                        )
+                        if cal_result.get("success"):
+                            self._calendar_action = "add"
+                            self._calendar_data = {"title": title, "date": date}
+                            logger.info(f"Tool tag CALENDAR: added '{title}' on {date}")
+                        else:
+                            logger.error(f"Tool tag CALENDAR failed: {cal_result.get('error')}")
+
+                elif tool == "calendar_query":
+                    query = action.get("query", "")
+                    if query:
+                        calendar = get_calendar()
+                        events = calendar.query_events(query)
+                        if not events:
+                            events = calendar.on_this_day(query)
+                        if events:
+                            event_lines = ", ".join(f"{e['title']} ({e['date']})" for e in events[:5])
+                            results.append(f"\n[Calendar results for '{query}': {event_lines}]")
+                        else:
+                            results.append(f"\n[No calendar events found for '{query}'.]")
+
+                elif tool == "list_writings":
+                    writing_tool = get_writing_tool()
+                    listing = writing_tool.format_listing_for_context()
+                    if listing:
+                        results.append(f"\n{listing}")
+                    else:
+                        results.append("\n[Your writings folder is empty.]")
+
+                elif tool == "list_calendar":
+                    calendar = get_calendar()
+                    context = calendar.format_for_context()
+                    if context:
+                        results.append(f"\n{context}")
+                    else:
+                        results.append("\n[Your calendar is empty.]")
+
+                elif tool == "read_writing":
+                    title = action.get("title", "")
+                    writing_tool = get_writing_tool()
+                    result = writing_tool.load_writing(title)
+                    if result.get("success"):
+                        body = result.get("body", result.get("content", ""))
+                        if len(body) > 2000:
+                            body = body[:2000] + "\n[...truncated]"
+                        results.append(f"\n[Your writing \"{result.get('title', title)}\":\n{body}]")
+                    else:
+                        results.append(f"\n[No writing found matching '{title}'.]")
+
+                elif tool == "export":
+                    title = action.get("title", "")
+                    fmt = action.get("format", "pdf")
+                    writing_tool = get_writing_tool()
+                    result = writing_tool.export_writing(title, fmt)
+                    if result.get("success"):
+                        results.append(f"\n[Exported '{title}' as {fmt} → {result.get('export_filename')}]")
+                    else:
+                        results.append(f"\n[Export failed: {result.get('error', 'unknown error')}]")
+
+        except Exception as e:
+            logger.error(f"Error executing tool actions: {e}")
+
+        return "".join(results)
+
     async def handle_message(self, user_message: str, include_image: bool = False) -> Dict[str, Any]:
         """Main message handling pipeline"""
         try:
@@ -1404,6 +1513,16 @@ These are YOUR tools. You don't need to open anything or ask how — just expres
 
             # 2. Generate response with KoboldCpp
             response = await self.generate_response(user_message, memory_context, include_image=include_image)
+
+            # 2b. Parse structured tool tags from her response (primary path)
+            # Tags like [WRITE: "title"], [CALENDAR: "event" on "date"] are stripped
+            # from the displayed response and executed as tool actions.
+            response, tool_actions = parse_tool_tags(response)
+            if tool_actions:
+                tool_results = await self._execute_tool_actions(tool_actions, response)
+                # If a tool produced context to feed back, append it
+                if tool_results:
+                    response = response + tool_results
 
             # Snapshot the image-viewing flag before memory storage resets it
             viewing_image_this_turn = self._viewing_image
