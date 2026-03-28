@@ -618,7 +618,7 @@
     <div class="container">
         <div class="header">
             <h1>🌊 Aeynis</h1>
-            <p>Bridge Chat • Backend localhost:5555</p>
+            <p>Bridge Chat • The Bridge</p>
         </div>
 
         <div id="status" class="status">
@@ -681,7 +681,7 @@
                 <button id="sendBtn">Send</button>
             </div>
             <div class="config-info">
-                Bridge Backend @ localhost:5555 • Basins + Memory + KoboldCpp + Library
+                The Bridge • Basins + Memory + KoboldCpp + Library
             </div>
         </div>
     </div>
@@ -765,7 +765,7 @@
             const payload = { message: userMessage };
             if (includeImage) payload.include_image = true;
 
-            const response = await fetch('http://localhost:5555/api/submit', {
+            const response = await fetch('/api/submit', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
@@ -885,7 +885,7 @@
         // ---------------------------------------------------------------
         // Library Panel
         // ---------------------------------------------------------------
-        const BACKEND = 'http://localhost:5555';
+        const BACKEND = window.location.origin;
         const libraryPanel = document.getElementById('libraryPanel');
         const libraryBtn = document.getElementById('libraryBtn');
         const libraryClose = document.getElementById('libraryClose');

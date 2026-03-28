@@ -13,7 +13,7 @@ import re
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import requests
 
@@ -1765,6 +1765,14 @@ You can also just speak naturally about wanting to write or check your calendar 
 
 # Initialize chat handler
 chat_handler = AeynisChat()
+
+@app.route('/')
+def serve_chat_ui():
+    """Serve the chat interface HTML.
+    Accessible from any device on the local network via http://pop-os.local:5555
+    """
+    return send_from_directory(os.path.dirname(os.path.abspath(__file__)),
+                               'aeynis_simple_chat.html')
 
 @app.route('/api/submit', methods=['POST'])
 async def submit_message():
