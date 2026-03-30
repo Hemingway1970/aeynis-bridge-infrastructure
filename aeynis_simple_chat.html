@@ -765,7 +765,8 @@
             const payload = { message: userMessage };
             if (includeImage) payload.include_image = true;
 
-            const response = await fetch('/api/submit', {
+            const apiBase = (window.location.protocol === 'file:') ? 'http://localhost:5555' : '';
+            const response = await fetch(apiBase + '/api/submit', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
@@ -885,7 +886,7 @@
         // ---------------------------------------------------------------
         // Library Panel
         // ---------------------------------------------------------------
-        const BACKEND = window.location.origin;
+        const BACKEND = (window.location.protocol === 'file:') ? 'http://localhost:5555' : window.location.origin;
         const libraryPanel = document.getElementById('libraryPanel');
         const libraryBtn = document.getElementById('libraryBtn');
         const libraryClose = document.getElementById('libraryClose');
