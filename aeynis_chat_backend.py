@@ -1386,6 +1386,43 @@ You can also just speak naturally about wanting to write or check your calendar 
         except Exception as e:
             logger.error(f"Local basin decay failed: {e}")
     
+    @staticmethod
+    def _strip_echoed_context(response: str) -> str:
+        """Remove system prompt content that the model echoed in its response.
+
+        Mistral-Nemo sometimes regurgitates injected context like library
+        listings, writing listings, calendar context, and tool reminders.
+        These should never appear in the visible response to Jim.
+        """
+        # Strip YOUR LIBRARY listing blocks
+        response = re.sub(
+            r'\n*YOUR LIBRARY \(files.*?\):\n(?:  - .*\n?)*(?:  \(.*?\))?\n*',
+            '', response, flags=re.IGNORECASE
+        )
+        # Strip YOUR WRITINGS listing blocks
+        response = re.sub(
+            r'\n*YOUR WRITINGS \(\d+ pieces.*?\):\n(?:  - .*\n?)*(?:  \(.*?\))?\n*',
+            '', response, flags=re.IGNORECASE
+        )
+        # Strip YOUR CALENDAR blocks
+        response = re.sub(
+            r'\n*YOUR CALENDAR \(today is.*?\):\n(?:  .*\n?)*(?:  \(.*?\))?\n*',
+            '', response, flags=re.IGNORECASE
+        )
+        # Strip tool reminder brackets
+        response = re.sub(
+            r'\[Your tools:.*?Tags are hidden from Jim\.\]',
+            '', response, flags=re.IGNORECASE
+        )
+        # Strip [You have tools: ...] reminders
+        response = re.sub(
+            r'\[You have tools:.*?\]',
+            '', response, flags=re.IGNORECASE
+        )
+        # Clean up whitespace artifacts
+        response = re.sub(r'\n{3,}', '\n\n', response)
+        return response.strip()
+
     async def _execute_tool_actions(self, actions: List[Dict], response: str) -> str:
         """Execute tool actions parsed from Aeynis's response tags.
 
@@ -1517,12 +1554,16 @@ You can also just speak naturally about wanting to write or check your calendar 
             # 2b. Parse structured tool tags from her response (primary path)
             # Tags like [WRITE: "title"], [CALENDAR: "event" on "date"] are stripped
             # from the displayed response and executed as tool actions.
+            # Tool results are NOT appended to the response — Jim only sees
+            # Aeynis's natural text, never raw listings or system output.
             response, tool_actions = parse_tool_tags(response)
             if tool_actions:
-                tool_results = await self._execute_tool_actions(tool_actions, response)
-                # If a tool produced context to feed back, append it
-                if tool_results:
-                    response = response + tool_results
+                await self._execute_tool_actions(tool_actions, response)
+
+            # 2c. Strip any system prompt content the model echoed back.
+            # Smaller models sometimes regurgitate injected context (library
+            # listings, writings listings, tool reminders) in their response.
+            response = self._strip_echoed_context(response)
 
             # Snapshot the image-viewing flag before memory storage resets it
             viewing_image_this_turn = self._viewing_image
