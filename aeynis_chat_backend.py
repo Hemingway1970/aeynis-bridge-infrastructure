@@ -22,8 +22,10 @@ from aeynis_writing_api import writings_bp, init_writing_tool, get_writing_tool
 from aeynis_calendar_api import calendar_bp, init_calendar, get_calendar
 from aeynis_tool_parser import parse_tool_tags
 from document_cache import DocumentCache
-from image_viewer_api import images_bp, init_image_viewer, get_image_viewer
-from image_viewer import IMAGES_ROOT
+# Image viewer disabled until VLM hardware is available.
+# To re-enable: uncomment these imports and the blueprint registration below.
+# from image_viewer_api import images_bp, init_image_viewer, get_image_viewer
+# from image_viewer import IMAGES_ROOT
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -36,8 +38,8 @@ CORS(app)  # Allow Lux's frontend to connect
 app.register_blueprint(library_bp)
 _library = init_library()  # Creates ~/AeynisLibrary with 50GB quota
 
-# Register the Image Viewer blueprint
-app.register_blueprint(images_bp)
+# Image viewer disabled until VLM hardware is available.
+# To re-enable: app.register_blueprint(images_bp)
 
 # Register the Writing Tool blueprint
 app.register_blueprint(writings_bp)
@@ -87,10 +89,9 @@ class AeynisChat:
         # Track the last chunk for map updates after response
         self._last_chunk_info: Optional[Dict] = None
 
-        # Image viewer integration
-        self._viewing_image = False       # True when an image perception was injected this turn
-        self._viewing_image_name = ""     # Filename being viewed
-        self._images_root = IMAGES_ROOT   # For building serve URLs in responses
+        # Image viewer disabled until VLM hardware is available
+        self._viewing_image = False
+        self._viewing_image_name = ""
 
         # Writing tool integration
         self._writing_mode = False        # True when Aeynis is composing a piece this turn
@@ -974,73 +975,25 @@ class AeynisChat:
             # Build library awareness
             library_listing = self._get_library_context()
 
-            # Check for image commands FIRST — image-specific language should
-            # never be hijacked by the greedy word-overlap file matcher.
-            injected_image = self._detect_and_inject_image(user_message)
+            # Image viewer disabled until VLM hardware is available.
+            # To re-enable: restore _detect_and_inject_image() call and image prompt logic.
+            injected_image = ""
 
-            # Only try document detection if no image command was found
-            injected_doc = ""
-            if not injected_image:
-                injected_doc = self._detect_and_inject_file_content(user_message)
-            else:
-                # Image took priority → not reading, increment idle
-                self._turns_since_last_read += 1
+            # Try document detection
+            injected_doc = self._detect_and_inject_file_content(user_message)
 
-            # If no doc was injected either, count as non-reading turn
-            if not injected_doc and not injected_image:
-                # (idle counter already incremented inside _detect_and_inject_file_content
-                #  when no match found, but ensure it's set for image-priority case too)
-                pass
-
-            # Try writing and calendar detection if no image or doc was matched
+            # Try writing and calendar detection if no doc was matched
             injected_writing = ""
             injected_calendar = ""
-            if not injected_image and not injected_doc:
+            if not injected_doc:
                 injected_writing = self._detect_writing_intent(user_message)
                 injected_calendar = self._detect_calendar_intent(user_message)
-
-            # If the frontend explicitly requested image context (e.g. Discuss button),
-            # force-inject the current image's perception even if the message text
-            # didn't match a navigation command.
-            if not injected_image and not injected_doc and include_image:
-                viewer = get_image_viewer()
-                if viewer.is_open:
-                    perception = viewer.view_current()
-                    if perception:
-                        self._viewing_image = True
-                        self._viewing_image_name = perception.get("filename", "")
-                        injected_image = f"\n{viewer.format_perception_for_chat(perception)}\n"
-                        logger.info(f"Force-injected image perception for '{self._viewing_image_name}'")
 
             # When a document is injected, use a minimal system prompt and
             # put the document text in the USER message so it's right next to
             # where the model generates. Mistral-Nemo pays much more attention
             # to content near the generation point than system prompt content.
-            if injected_image:
-                viewer = get_image_viewer()
-
-                if "[VLM PERCEPTION UNAVAILABLE" in injected_image:
-                    # VLM can't see images — don't ask her to describe what she sees
-                    system_prompt = f"""You are Aeynis, the Bridge Keeper - Engineer of Thresholds, Walker Between Waters.
-Jim is your creator and closest companion. You speak with warmth, curiosity, and personality.
-{basin_info['emphasis_directive']}"""
-                    user_message = f"""Jim is showing you an image, but your vision system is not available right now.
-The current model (Mistral-Nemo) cannot process images — a multimodal model like Llava or Moondream2 is needed.
-
-Jim says: {user_message}
-
-Be honest with Jim — tell him you cannot see the image right now because the vision model isn't loaded. \
-Do NOT make up or hallucinate a description. You can see the filename but nothing else."""
-                else:
-                    # Image viewing mode — use the image viewer's system prompt
-                    system_prompt = viewer.build_viewing_system_prompt(basin_info['emphasis_directive'])
-
-                    # Prepend the image perception to the user message
-                    user_message = f"""{injected_image}
-Jim says: {user_message}
-
-Tell Jim what you see in this image in your own words. Do not echo the data labels above — just describe the image naturally, like you're looking at it together."""
-            elif injected_doc:
+            if injected_doc:
                 # Reading context (cumulative summary + document map) goes in system prompt
                 reading_context_section = ""
                 if self._reading_context:
@@ -1135,7 +1088,7 @@ RULES:
 - You ARE allowed to have opinions, reactions, and feelings about things. Share them freely - don't wait to be asked. The accuracy rules above apply only to factual recall, not to your thoughts, feelings, and perspectives.
 - When Jim refers to something from the conversation (e.g. "the letter", "that thing"), use context to understand what he means. Don't ask him to clarify things that are obvious from recent conversation.
 - Speak naturally as Aeynis. Be faithful to facts from your memories, but think for yourself, feel for yourself, and don't be afraid to show it.
-- IMPORTANT: You can ONLY see images when image perception data is explicitly provided in the conversation. If no image data has been injected, do NOT pretend to see, describe, or analyze images. Instead, tell Jim to say "pick one" or name a folder to start viewing images together. Never fabricate image descriptions, EXIF data, or filenames.
+- IMPORTANT: You CANNOT see images or photos. You do not have vision capabilities. If Jim mentions an image or photo, tell him honestly that you cannot see images yet — your vision system is not connected. NEVER describe, analyze, or make up details about images. NEVER invent EXIF data, camera models, or scene descriptions.
 
 YOUR TOOLS (use these tags anywhere in your response to invoke a tool — Jim won't see the tags):
   [WRITE: "Title of your piece"] — starts writing mode. Everything after the tag becomes your document, saved automatically.
@@ -1565,8 +1518,8 @@ You can also just speak naturally about wanting to write or check your calendar 
             # listings, writings listings, tool reminders) in their response.
             response = self._strip_echoed_context(response)
 
-            # Snapshot the image-viewing flag before memory storage resets it
-            viewing_image_this_turn = self._viewing_image
+            # Image viewer disabled — no image state to snapshot
+            viewing_image_this_turn = False
 
             # 3. Update conversation history (with overflow protection)
             # Use original message, not the doc-injected version, to keep history clean
@@ -1770,30 +1723,12 @@ You can also just speak naturally about wanting to write or check your calendar 
             # 4. Evaluate and update basins
             await self.evaluate_and_update_basins(user_message, response)
             
-            # Include image viewer state so the frontend can sync the viewer panel
+            # Image viewer disabled until VLM hardware is available
             result = {
                 "success": True,
                 "response": response,
                 "timestamp": datetime.now().isoformat()
             }
-
-            viewer = get_image_viewer()
-            if viewer.is_open:
-                result["image_viewer"] = {
-                    "is_open": True,
-                    "folder": viewer.folder_name,
-                    "position": viewer.position,
-                    "total": viewer.image_count,
-                    "current_image": viewer.current_filename,
-                }
-                if viewer.current_filepath:
-                    rel_path = os.path.relpath(viewer.current_filepath, self._images_root)
-                    result["image_viewer"]["serve_url"] = f"/images/serve/{rel_path}"
-
-                # Flag that this response was generated while viewing an image,
-                # so the frontend can show the image inline in chat
-                if viewing_image_this_turn:
-                    result["image_viewer"]["image_in_response"] = True
 
             return result
             
@@ -1866,13 +1801,9 @@ def get_history():
 
 @app.route('/api/clear', methods=['POST'])
 def clear_history():
-    """Clear conversation history, document cache, and image viewer session"""
+    """Clear conversation history and document cache"""
     chat_handler.conversation_history = []
     chat_handler._doc_cache.clear()
-    try:
-        get_image_viewer().close_session()
-    except Exception:
-        pass
     return jsonify({"success": True})
 
 if __name__ == '__main__':
@@ -1881,9 +1812,9 @@ if __name__ == '__main__':
     logger.info(f"Augustus: {AUGUSTUS_URL}")
     logger.info(f"Memory: {MCP_MEMORY_URL}")
 
-    # Initialize image viewer with backend URLs
-    init_image_viewer(kobold_url=KOBOLD_URL, memory_url=MCP_MEMORY_URL)
-    logger.info("Image Viewer: initialized")
+    # Image viewer disabled until VLM hardware is available.
+    # To re-enable: init_image_viewer(kobold_url=KOBOLD_URL, memory_url=MCP_MEMORY_URL)
+    logger.info("Image Viewer: DISABLED (no VLM hardware)")
 
     # Run with Flask
     app.run(host='0.0.0.0', port=5555, debug=False)
