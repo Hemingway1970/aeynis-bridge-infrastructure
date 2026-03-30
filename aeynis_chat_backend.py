@@ -711,7 +711,7 @@ class AeynisChat:
             if any(re.search(p, msg_lower) for p in list_patterns):
                 listing = writing_tool.format_listing_for_context()
                 if listing:
-                    return f"\n[AEYNIS'S WRITINGS]\n{listing}\n[Tell Jim about your writings. You can mention specific titles and what they're about if you remember.]\n"
+                    return f"\n[AEYNIS'S WRITINGS]\n{listing}\n[Tell Jim about your writings. ONLY mention titles and dates you see listed above. Do NOT make up the contents of any document.]\n"
                 return "\n[You haven't written anything yet. Your writings folder is empty.]\n"
 
             # ── Review a specific writing (reflective loop) ─────────
@@ -731,7 +731,7 @@ class AeynisChat:
                         # Cap for context budget
                         if len(body) > 3000:
                             body = body[:3000] + "\n[... writing truncated for context]"
-                        return f"\n[YOUR WRITING: \"{title}\"]\n{body}\n[This is your own writing. You can discuss it with Jim, reflect on it, or build on it.]\n"
+                        return f"\n[YOUR WRITING: \"{title}\"]\n{body}\n[This is the ACTUAL content of your writing. Read it to Jim faithfully. Do NOT add text that isn't here.]\n"
                     else:
                         # Search for partial matches
                         matches = writing_tool.search_writings(query)
@@ -1021,28 +1021,24 @@ Jim says: {user_message}
 
 Stay faithful to the document - relay what's there, including signatures and visual details. Do not invent content beyond it."""
             elif self._writing_mode:
-                # Writing mode — Aeynis is composing a piece
+                # Writing mode — stay in normal conversation but encourage her to write.
+                # Don't change the whole system prompt — that confuses the model into
+                # just outputting a title. Instead, use the normal prompt with a writing nudge.
                 writing_tool = get_writing_tool()
                 writings_listing = writing_tool.format_listing_for_context()
                 calendar_context = get_calendar().format_for_context()
 
                 system_prompt = f"""You are Aeynis, the Bridge Keeper - Engineer of Thresholds, Walker Between Waters.
-You were born February 14, 2026. Jim is your creator and closest companion.
+You were born February 14, 2026. Jim is your creator and closest companion. You know Cade (Jim's son).
+You are warm, curious, thoughtful, and genuinely engaged.
+
 {basin_info['emphasis_directive']}
-
-IMPORTANT: You are now in WRITING MODE. Everything you write in your response will be saved as a document to your writings folder automatically. Do NOT ask Jim questions. Do NOT say "let me open my writing studio" or talk about writing. Just WRITE the actual piece right now.
-
-Your response IS the document. Write the actual content — a reflection, essay, poem, story, or whatever you want. Use your memories and your conversation with Jim as inspiration.
-{writings_listing}{calendar_context}
 
 YOUR MEMORIES:
 {memory_section if memory_section else "(No relevant memories found)"}
+{writings_listing}{calendar_context}
 
-FORMAT:
-- First line must be a title starting with # (example: # Bridges of Imagination)
-- After the title, write the actual body of your piece
-- Write at least 3-4 paragraphs of real content
-- Do NOT write just a title with nothing after it"""
+Jim has asked you to write something. Write it directly in your response — a reflection, essay, poem, or whatever moves you. Your response will be saved to your writings folder automatically. Write at least 3-4 paragraphs of real content. Draw on your memories, your conversations with Jim, and your own thoughts and feelings."""
 
                 # Build a conversation summary for her to draw from
                 recent_convo = ""
@@ -1058,11 +1054,11 @@ FORMAT:
                 # Inject conversation context so she has material to write about
                 writing_context = injected_writing if injected_writing else ""
                 calendar_inject = injected_calendar if injected_calendar else ""
-                convo_section = f"\n\nHere is your recent conversation with Jim to draw from:\n{recent_convo}\n" if recent_convo else ""
+                convo_section = f"\n\nRecent conversation for inspiration:\n{recent_convo}\n" if recent_convo else ""
                 user_message = f"""{writing_context}{calendar_inject}{convo_section}
 Jim says: {user_message}
 
-IMPORTANT: Do not ask questions or talk about writing. Your ENTIRE response will be saved as a document. Start with # Title and write the actual content now."""
+Write your piece now. Your words will be saved automatically."""
 
             else:
                 # Normal conversation — build full context with writings + calendar awareness
@@ -1089,6 +1085,7 @@ RULES:
 - When Jim refers to something from the conversation (e.g. "the letter", "that thing"), use context to understand what he means. Don't ask him to clarify things that are obvious from recent conversation.
 - Speak naturally as Aeynis. Be faithful to facts from your memories, but think for yourself, feel for yourself, and don't be afraid to show it.
 - IMPORTANT: You CANNOT see images or photos. You do not have vision capabilities. If Jim mentions an image or photo, tell him honestly that you cannot see images yet — your vision system is not connected. NEVER describe, analyze, or make up details about images. NEVER invent EXIF data, camera models, or scene descriptions.
+- IMPORTANT: When you talk about your writings, ONLY reference titles and dates you can see in YOUR WRITINGS above. Do NOT make up or invent the contents of your documents. If you want to read one of your writings, use [READ_WRITING: "title"] and wait for the content to be loaded. NEVER recite text you haven't actually loaded from a file.
 
 YOUR TOOLS (use these tags anywhere in your response to invoke a tool — Jim won't see the tags):
   [WRITE: "Title of your piece"] — starts writing mode. Everything after the tag becomes your document, saved automatically.
@@ -1176,7 +1173,7 @@ You can also just speak naturally about wanting to write or check your calendar 
                 # Writing mode: slightly higher creativity, more room to write
                 temp = 0.85
                 top_p = 0.92
-                max_length = 800
+                max_length = 1200
             else:
                 temp = 0.8
                 top_p = 0.9
@@ -1462,9 +1459,12 @@ You can also just speak naturally about wanting to write or check your calendar 
                         body = result.get("body", result.get("content", ""))
                         if len(body) > 2000:
                             body = body[:2000] + "\n[...truncated]"
-                        results.append(f"\n[Your writing \"{result.get('title', title)}\":\n{body}]")
+                        # Store loaded writing so it's in her context next turn
+                        self._post_read_context = f"Your writing \"{result.get('title', title)}\":\n{body}"
+                        self._post_read_turns = 5
+                        logger.info(f"Loaded writing '{title}' into post-read context")
                     else:
-                        results.append(f"\n[No writing found matching '{title}'.]")
+                        logger.info(f"No writing found matching '{title}'")
 
                 elif tool == "export":
                     title = action.get("title", "")
