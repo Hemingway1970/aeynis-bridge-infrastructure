@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "aeynis-bridge": {
+      "command": "/home/jameslombardo/bridge/mcp-venv/bin/python3",
+      "args": ["/home/jameslombardo/bridge/bridge-server.py"]
+    }
+  }
+}
