@@ -102,6 +102,10 @@ class AeynisChat:
         self._calendar_action = ""        # "add", "query", or "" for this turn
         self._calendar_data = {}          # Extracted event data for this turn
 
+        # Tool assist cooldown — prevent re-triggering the same assist action
+        self._last_assist_action = ""     # Last assist action taken
+        self._assist_cooldown = 0         # Turns remaining before assist can re-trigger
+
         logger.info("Aeynis Chat Backend initialized")
     
     async def retrieve_relevant_memories(self, query: str, n_results: int = MAX_CONTEXT_MEMORIES) -> List[Dict]:
@@ -1190,7 +1194,7 @@ RULES:
                 "max_tokens": max_tokens,
                 "temperature": temp,
                 "top_p": top_p,
-                "repetition_penalty": 1.1,
+                "repetition_penalty": 1.15,
             }
 
             # Include tools in non-reading modes so Aeynis can write/calendar
@@ -1339,6 +1343,11 @@ RULES:
         user_lower = user_message.lower()
         combined = text_lower + " " + user_lower
 
+        # Cooldown: skip if we just did this same assist action
+        if self._assist_cooldown > 0:
+            self._assist_cooldown -= 1
+            return None
+
         try:
             # ── Calendar check assist ──────────────────────────────
             cal_check_patterns = [
@@ -1356,6 +1365,7 @@ RULES:
                     any(p in user_lower for p in cal_user_patterns)):
                 tool_result = self._execute_local_tool("calendar_list_events", {"days_ahead": 7})
                 logger.info(f"Tool assist: calendar_list_events -> {tool_result[:100]}")
+                self._assist_cooldown = 2  # Don't re-trigger for 2 turns
 
                 # Clean the model's response of any fake calendar data or trigger syntax
                 clean = re.sub(r'::trigger.*?::', '', response_text).strip()
@@ -1415,6 +1425,7 @@ RULES:
                     "time": time_str,
                 })
                 logger.info(f"Tool assist: calendar_add_event -> {tool_result}")
+                self._assist_cooldown = 3  # Don't re-trigger for 3 turns
                 # Don't modify the response text — she already said she'd add it
                 return None
 
