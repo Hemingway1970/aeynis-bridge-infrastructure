@@ -1541,9 +1541,12 @@ RULES:
             elif name == "calendar_add_event":
                 title = args.get("title", "")
                 date = args.get("date", "")
+                time_str = args.get("time", "")
+                # Combine date and time for the parser (add_event parses time from date string)
+                if time_str:
+                    date = f"{date} {time_str}"
                 cal = get_calendar()
                 result = cal.add_event(title=title, date=date,
-                                       time=args.get("time", ""),
                                        description=args.get("description", ""))
                 if result.get("success"):
                     self._calendar_action = "add"
