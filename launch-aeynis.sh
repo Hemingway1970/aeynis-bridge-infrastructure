@@ -13,7 +13,9 @@ set -e
 BRIDGE_DIR="$HOME/bridge"
 KOBOLD_DIR="$HOME/koboldcpp"
 MODEL="Mistral-Nemo-Instruct-2407-Q4_K_M.gguf"
-MCP_SERVER="python3 ${BRIDGE_DIR}/bridge-server.py"
+MCP_VENV="${BRIDGE_DIR}/mcp-venv"
+MCP_PYTHON="${MCP_VENV}/bin/python3"
+MCP_SERVER="${MCP_PYTHON} ${BRIDGE_DIR}/bridge-server.py"
 
 echo "========================================"
 echo "  Launching Aeynis with MCP Bridge"
@@ -26,10 +28,14 @@ if [ ! -f "${BRIDGE_DIR}/bridge-server.py" ]; then
     exit 1
 fi
 
-# Verify MCP SDK is installed
-if ! python3 -c "import mcp" 2>/dev/null; then
-    echo "MCP SDK not installed. Installing..."
-    pip install mcp
+# Verify MCP venv and SDK
+if [ ! -f "${MCP_PYTHON}" ]; then
+    echo "Creating MCP virtual environment..."
+    python3 -m venv "${MCP_VENV}"
+fi
+if ! "${MCP_PYTHON}" -c "import mcp" 2>/dev/null; then
+    echo "Installing MCP SDK in venv..."
+    "${MCP_VENV}/bin/pip" install "mcp[cli]"
 fi
 
 # Verify KoboldCpp exists

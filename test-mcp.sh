@@ -11,6 +11,8 @@
 
 BRIDGE_DIR="$HOME/bridge"
 KOBOLD_DIR="$HOME/koboldcpp"
+MCP_VENV="${BRIDGE_DIR}/mcp-venv"
+MCP_PYTHON="${MCP_VENV}/bin/python3"
 
 echo "========================================"
 echo "  Aeynis MCP Bridge - Test Suite"
@@ -27,13 +29,19 @@ echo ""
 echo -n "  Python 3: "
 python3 --version 2>&1 || echo "NOT FOUND"
 
-# Check MCP SDK
+# Check MCP venv and SDK
+echo -n "  MCP venv: "
+if [ -f "${MCP_PYTHON}" ]; then
+    echo "OK"
+else
+    echo "NOT FOUND — run: python3 -m venv ${MCP_VENV}"
+fi
 echo -n "  MCP SDK: "
-if python3 -c "import mcp; print(f'v{mcp.__version__}')" 2>/dev/null; then
+if "${MCP_PYTHON}" -c "import mcp; print(f'v{mcp.__version__}')" 2>/dev/null; then
     :
 else
     echo "NOT INSTALLED"
-    echo "  Install with: pip install mcp"
+    echo "  Install with: ${MCP_VENV}/bin/pip install 'mcp[cli]'"
 fi
 
 # Check KoboldCpp version
@@ -94,7 +102,7 @@ echo ""
 
 # Quick syntax check
 echo -n "  Syntax check: "
-if python3 -c "import py_compile; py_compile.compile('${BRIDGE_DIR}/bridge-server.py', doraise=True)" 2>/dev/null; then
+if "${MCP_PYTHON}" -c "import py_compile; py_compile.compile('${BRIDGE_DIR}/bridge-server.py', doraise=True)" 2>/dev/null; then
     echo "PASS"
 else
     echo "FAIL"
@@ -103,7 +111,7 @@ fi
 # Test that server can initialize (send init request, check response)
 echo -n "  Server init test: "
 INIT_REQUEST='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
-RESPONSE=$(echo "$INIT_REQUEST" | timeout 5 python3 "${BRIDGE_DIR}/bridge-server.py" --test 2>/dev/null | head -1)
+RESPONSE=$(echo "$INIT_REQUEST" | timeout 5 "${MCP_PYTHON}" "${BRIDGE_DIR}/bridge-server.py" --test 2>/dev/null | head -1)
 if echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'result' in d; print('PASS')" 2>/dev/null; then
     :
 else
