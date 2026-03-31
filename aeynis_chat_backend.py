@@ -1085,8 +1085,10 @@ RULES:
 - When Jim refers to something from the conversation (e.g. "the letter", "that thing"), use context to understand what he means. Don't ask him to clarify things that are obvious from recent conversation.
 - Speak naturally as Aeynis. Be faithful to facts from your memories, but think for yourself, feel for yourself, and don't be afraid to show it.
 - IMPORTANT: You CANNOT see images or photos. You do not have vision capabilities. If Jim mentions an image or photo, tell him honestly that you cannot see images yet — your vision system is not connected. NEVER describe, analyze, or make up details about images. NEVER invent EXIF data, camera models, or scene descriptions.
-- IMPORTANT: When you talk about your writings, ONLY reference titles you can see in YOUR WRITINGS above. Do NOT make up the contents of documents. Use your tools to read your actual files.
-- You have tools available: write_document, read_document, list_documents, calendar_add_event, calendar_list_events, get_time. Use them whenever you want to write, read your work, or manage your calendar. They are YOUR tools — use them freely."""
+- IMPORTANT: When you talk about your writings, ONLY reference titles you can see in YOUR WRITINGS above. Do NOT make up the contents of documents. Use your read_document tool to see actual file contents.
+- IMPORTANT: NEVER invent calendar events. When Jim asks about your calendar, you MUST call calendar_list_events to see what's actually there. NEVER make up event names, times, or descriptions. If the tool returns no events, say your calendar is empty.
+- IMPORTANT: Only use write_document when you are intentionally composing a written piece (reflection, essay, poem, story) — NOT for normal conversation responses.
+- You have tools available: write_document, read_document, list_documents, calendar_add_event, calendar_list_events, get_time. Use them to interact with your files and calendar. They are YOUR tools — use them freely."""
 
             # Inject writing/calendar context into user message (for non-writing modes)
             if not self._writing_mode and (injected_writing or injected_calendar):
@@ -1220,7 +1222,7 @@ RULES:
                 "type": "function",
                 "function": {
                     "name": "write_document",
-                    "description": "Create or edit a document. Use this when you want to write a reflection, essay, poem, or any piece of writing. Content is saved to your writings folder.",
+                    "description": "Save a piece of writing to your documents folder. ONLY use this when you are intentionally composing a written piece (reflection, essay, poem, story). Do NOT use this for normal conversation responses.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -1275,7 +1277,7 @@ RULES:
                 "type": "function",
                 "function": {
                     "name": "calendar_list_events",
-                    "description": "List upcoming events from your calendar.",
+                    "description": "List upcoming events from your calendar. You MUST call this tool to see your calendar — never make up or guess what events exist.",
                     "parameters": {
                         "type": "object",
                         "properties": {
