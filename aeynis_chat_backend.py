@@ -1217,6 +1217,13 @@ RULES:
             else:
                 generated_text = message.get("content", "").strip()
 
+                # Post-generation tool assist: if the model tried to use a tool
+                # but didn't emit proper tool_calls (common with 12B models),
+                # detect the intent from its text and execute the tool for it.
+                assisted = await self._assist_tool_from_text(generated_text, user_message)
+                if assisted:
+                    generated_text = assisted
+
             logger.info(f"Generated response: {generated_text[:100]}...")
             return generated_text
 
@@ -1305,6 +1312,104 @@ RULES:
                 },
             },
         ]
+
+    async def _assist_tool_from_text(self, response_text: str, user_message: str) -> Optional[str]:
+        """Post-generation tool assist for when the model doesn't emit tool_calls.
+
+        Detects tool intent from the model's text response and the user's message,
+        executes the tool locally, and incorporates the result. Returns the
+        modified response, or None if no assist was needed.
+        """
+        text_lower = response_text.lower()
+        user_lower = user_message.lower()
+        combined = text_lower + " " + user_lower
+
+        try:
+            # ── Calendar check assist ──────────────────────────────
+            cal_check_patterns = [
+                "let me check my calendar", "let me look at my calendar",
+                "check my calendar", "checking my calendar",
+                "::trigger", "calendar_list",
+                "here are the events", "upcoming events",
+            ]
+            cal_user_patterns = [
+                "check your calendar", "what's on your calendar",
+                "whats on your calendar", "show me your calendar",
+                "your calendar", "any events",
+            ]
+            if (any(p in text_lower for p in cal_check_patterns) or
+                    any(p in user_lower for p in cal_user_patterns)):
+                tool_result = self._execute_local_tool("calendar_list_events", {"days_ahead": 7})
+                logger.info(f"Tool assist: calendar_list_events -> {tool_result[:100]}")
+
+                # Clean the model's response of any fake calendar data or trigger syntax
+                clean = re.sub(r'::trigger.*?::', '', response_text).strip()
+                # If she already said something natural, append the real data
+                if "empty" in tool_result.lower() or "no upcoming" in tool_result.lower():
+                    if "empty" not in clean.lower():
+                        return clean + "\n\nI checked — my calendar is actually empty right now. Would you like to add something?"
+                    return clean if clean else "My calendar is empty right now. Would you like to add something?"
+                else:
+                    return clean + f"\n\nHere's what I found:\n{tool_result}"
+
+            # ── Calendar add assist ────────────────────────────────
+            add_patterns = [
+                "i'll add it", "i've added", "added to my calendar",
+                "add it to my calendar", "let me add", "adding it now",
+            ]
+            if any(p in text_lower for p in add_patterns):
+                # Try to extract event details from conversation
+                # Look for time patterns and event descriptions
+                import re as _re
+                time_match = _re.search(r'(\d{1,2}(?::\d{2})?\s*(?:AM|PM|am|pm))', combined)
+                time_str = time_match.group(1) if time_match else ""
+
+                # Extract title from context — look for what they planned
+                title = ""
+                title_patterns = [
+                    r'(?:writing session|story session|session)\b',
+                    r'(?:writing adventure|adventure)\b',
+                    r'(?:plan|schedule)\s+(?:a\s+)?(.+?)(?:\s+for|\s+at|\s+tomorrow)',
+                ]
+                for tp in title_patterns:
+                    tm = _re.search(tp, combined, _re.IGNORECASE)
+                    if tm:
+                        title = tm.group(0).strip() if not tm.lastindex else tm.group(1).strip()
+                        break
+                if not title:
+                    title = "Planned activity with Jim"
+
+                # Determine date
+                date = "tomorrow" if "tomorrow" in combined else datetime.now().strftime("%Y-%m-%d")
+
+                tool_result = self._execute_local_tool("calendar_add_event", {
+                    "title": title,
+                    "date": date,
+                    "time": time_str,
+                })
+                logger.info(f"Tool assist: calendar_add_event -> {tool_result}")
+                # Don't modify the response text — she already said she'd add it
+                return None
+
+            # ── List documents assist ──────────────────────────────
+            list_doc_patterns = [
+                "list my documents", "here are my documents",
+                "let me list", "my writings",
+            ]
+            list_user_patterns = [
+                "list your documents", "list your writings",
+                "show me your documents", "what have you written",
+            ]
+            if (any(p in text_lower for p in list_doc_patterns) or
+                    any(p in user_lower for p in list_user_patterns)):
+                tool_result = self._execute_local_tool("list_documents", {})
+                logger.info(f"Tool assist: list_documents -> {tool_result[:100]}")
+                return tool_result
+
+        except Exception as e:
+            logger.error(f"Tool assist error: {e}")
+
+        return None
 
     async def _handle_tool_calls(self, messages: List[Dict],
                                   tool_calls: List[Dict],
@@ -1604,6 +1709,8 @@ RULES:
             r'\[You have tools:.*?\]',
             '', response, flags=re.IGNORECASE
         )
+        # Strip ::trigger:: syntax (failed tool call attempts)
+        response = re.sub(r'::trigger.*?::', '', response)
         # Clean up whitespace artifacts
         response = re.sub(r'\n{3,}', '\n\n', response)
         return response.strip()
