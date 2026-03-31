@@ -123,6 +123,76 @@ def parse_tool_tags(response: str) -> Tuple[str, List[Dict]]:
         logger.info(f"Parsed READ_WRITING tag: '{title}'")
     cleaned = re.sub(read_pattern, '', cleaned, flags=re.IGNORECASE)
 
+    # ── JSON function call blocks ──
+    # The model sometimes outputs tool calls as JSON blocks like:
+    #   ```json
+    #   {"function": "calendar_list_events", "arguments": {"days_ahead": 7}}
+    #   ```
+    # Parse these and convert to actions.
+    json_block_pattern = r'```json\s*\n?\s*(\{[^`]+?\})\s*\n?\s*```'
+    for m in re.finditer(json_block_pattern, cleaned, re.DOTALL):
+        try:
+            import json
+            call = json.loads(m.group(1))
+            func_name = call.get("function", call.get("name", ""))
+            args = call.get("arguments", call.get("params", {}))
+
+            if func_name == "calendar_list_events":
+                actions.append({"tool": "list_calendar"})
+                logger.info(f"Parsed JSON function call: {func_name}")
+            elif func_name == "calendar_add_event":
+                actions.append({
+                    "tool": "calendar_add",
+                    "title": args.get("title", ""),
+                    "date": args.get("date", ""),
+                    "extra": args.get("description", ""),
+                })
+                logger.info(f"Parsed JSON function call: {func_name}")
+            elif func_name == "read_document":
+                actions.append({
+                    "tool": "read_writing",
+                    "title": args.get("filename", ""),
+                })
+                logger.info(f"Parsed JSON function call: {func_name}")
+            elif func_name == "write_document":
+                actions.append({
+                    "tool": "write",
+                    "title": args.get("filename", ""),
+                    "note": "",
+                })
+                logger.info(f"Parsed JSON function call: {func_name}")
+            elif func_name == "list_documents":
+                actions.append({"tool": "list_writings"})
+                logger.info(f"Parsed JSON function call: {func_name}")
+            elif func_name == "get_time":
+                logger.info(f"Parsed JSON function call: {func_name} (no-op)")
+            else:
+                logger.info(f"Unknown JSON function call: {func_name}")
+        except (json.JSONDecodeError, AttributeError) as e:
+            logger.warning(f"Failed to parse JSON function call: {e}")
+    cleaned = re.sub(json_block_pattern, '', cleaned, flags=re.DOTALL)
+
+    # Also catch inline JSON (without code fences)
+    inline_json_pattern = r'\{\s*"function"\s*:\s*"(\w+)"\s*,\s*"arguments"\s*:\s*(\{[^}]*\})\s*\}'
+    for m in re.finditer(inline_json_pattern, cleaned):
+        try:
+            import json
+            func_name = m.group(1)
+            args = json.loads(m.group(2))
+
+            if func_name == "calendar_list_events":
+                actions.append({"tool": "list_calendar"})
+            elif func_name == "read_document":
+                actions.append({"tool": "read_writing", "title": args.get("filename", "")})
+            elif func_name == "list_documents":
+                actions.append({"tool": "list_writings"})
+            elif func_name == "calendar_add_event":
+                actions.append({"tool": "calendar_add", "title": args.get("title", ""), "date": args.get("date", "")})
+            logger.info(f"Parsed inline JSON function call: {func_name}")
+        except (json.JSONDecodeError, AttributeError):
+            pass
+    cleaned = re.sub(inline_json_pattern, '', cleaned)
+
     # Clean up whitespace artifacts from tag removal
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
     cleaned = cleaned.strip()
