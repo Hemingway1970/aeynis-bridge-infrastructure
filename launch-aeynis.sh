@@ -84,4 +84,5 @@ cd "${KOBOLD_DIR}"
 python3 koboldcpp.py \
     "${MODEL}" \
     --usecublas --gpulayers 40 \
-    --mcpfile "${MCP_CONFIG}"
+    --mcpfile "${MCP_CONFIG}" \
+    --jinja_tools

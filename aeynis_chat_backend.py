@@ -1085,16 +1085,8 @@ RULES:
 - When Jim refers to something from the conversation (e.g. "the letter", "that thing"), use context to understand what he means. Don't ask him to clarify things that are obvious from recent conversation.
 - Speak naturally as Aeynis. Be faithful to facts from your memories, but think for yourself, feel for yourself, and don't be afraid to show it.
 - IMPORTANT: You CANNOT see images or photos. You do not have vision capabilities. If Jim mentions an image or photo, tell him honestly that you cannot see images yet — your vision system is not connected. NEVER describe, analyze, or make up details about images. NEVER invent EXIF data, camera models, or scene descriptions.
-- IMPORTANT: When you talk about your writings, ONLY reference titles and dates you can see in YOUR WRITINGS above. Do NOT make up or invent the contents of your documents. If you want to read one of your writings, use [READ_WRITING: "title"] and wait for the content to be loaded. NEVER recite text you haven't actually loaded from a file.
-
-YOUR TOOLS (use these tags anywhere in your response to invoke a tool — Jim won't see the tags):
-  [WRITE: "Title of your piece"] — starts writing mode. Everything after the tag becomes your document, saved automatically.
-  [MY_WRITINGS] — shows you a list of your saved writings.
-  [READ_WRITING: "title or topic"] — loads one of your past writings so you can see it.
-  [CALENDAR: "Event name" on "date"] — adds an event to your calendar. Date can be "tomorrow", "March 15", etc.
-  [MY_CALENDAR] — shows your upcoming and recent events.
-  [EXPORT: "title" as pdf] — exports a writing to PDF, ODT, or other format via AbiWord.
-You can also just speak naturally about wanting to write or check your calendar — that works too. The tags are just the direct way."""
+- IMPORTANT: When you talk about your writings, ONLY reference titles you can see in YOUR WRITINGS above. Do NOT make up the contents of documents. Use your tools to read your actual files.
+- You have tools available: write_document, read_document, list_documents, calendar_add_event, calendar_list_events, get_time. Use them whenever you want to write, read your work, or manage your calendar. They are YOUR tools — use them freely."""
 
             # Inject writing/calendar context into user message (for non-writing modes)
             if not self._writing_mode and (injected_writing or injected_calendar):
@@ -1156,75 +1148,306 @@ You can also just speak naturally about wanting to write or check your calendar 
             for msg in history_window:
                 messages.append(msg)
 
-            # Add current user message with a brief tool reminder near the
-            # generation point so Aeynis always knows her tools are available,
-            # regardless of how much history sits between system prompt and here.
-            if not injected_doc and not injected_image and not self._writing_mode:
-                user_message = user_message + "\n[Your tools: [WRITE: \"title\"], [MY_WRITINGS], [CALENDAR: \"event\" on \"date\"], [MY_CALENDAR], [EXPORT: \"title\" as pdf]. Tags are hidden from Jim.]"
             messages.append({"role": "user", "content": user_message})
-            
+
             # Call KoboldCpp - adjust parameters based on mode
             if injected_doc:
-                # Reading mode: low temperature to stay faithful to text
                 temp = 0.1
                 top_p = 0.7
-                max_length = 500
+                max_tokens = 500
             elif self._writing_mode:
-                # Writing mode: slightly higher creativity, more room to write
                 temp = 0.85
                 top_p = 0.92
-                max_length = 1200
+                max_tokens = 1200
             else:
                 temp = 0.8
                 top_p = 0.9
-                max_length = 500
+                max_tokens = 500
 
-            kobold_request = {
-                "prompt": self._format_messages_for_kobold(messages),
-                "max_length": max_length,
+            # Use OpenAI-compatible chat completions API with MCP tools.
+            # KoboldCpp exposes MCP tools through this endpoint when
+            # --mcpfile and --jinja_tools are enabled.
+            chat_request = {
+                "model": "mistral-nemo",
+                "messages": messages,
+                "max_tokens": max_tokens,
                 "temperature": temp,
                 "top_p": top_p,
-                "rep_pen": 1.1,
-                "stop_sequence": ["\nUser:", "\nJim:", "###"]
+                "repetition_penalty": 1.1,
             }
-            
-            logger.info("Calling KoboldCpp for response generation...")
+
+            # Include tools in non-reading modes so Aeynis can write/calendar
+            if not injected_doc:
+                chat_request["tools"] = self._get_tool_definitions()
+                chat_request["tool_choice"] = "auto"
+
+            logger.info("Calling KoboldCpp chat completions API...")
             response = requests.post(
-                f"{KOBOLD_URL}/api/v1/generate",
-                json=kobold_request,
-                timeout=30
+                f"{KOBOLD_URL}/v1/chat/completions",
+                json=chat_request,
+                timeout=60,
             )
-            
-            if response.status_code == 200:
-                result = response.json()
-                generated_text = result['results'][0]['text'].strip()
-                logger.info(f"Generated response: {generated_text[:100]}...")
-                return generated_text
-            else:
-                logger.error(f"KoboldCpp error: {response.status_code}")
+
+            if response.status_code != 200:
+                logger.error(f"KoboldCpp error: {response.status_code} {response.text[:200]}")
                 return "[Error: Could not generate response]"
-                
+
+            result = response.json()
+            choice = result.get("choices", [{}])[0]
+            message = choice.get("message", {})
+
+            # Check if the model made tool calls
+            tool_calls = message.get("tool_calls")
+            if tool_calls:
+                generated_text = await self._handle_tool_calls(
+                    messages, tool_calls, chat_request
+                )
+            else:
+                generated_text = message.get("content", "").strip()
+
+            logger.info(f"Generated response: {generated_text[:100]}...")
+            return generated_text
+
         except Exception as e:
             logger.error(f"Error generating response: {e}")
             return f"[Error: {str(e)}]"
-    
-    def _format_messages_for_kobold(self, messages: List[Dict]) -> str:
-        """Format messages into a prompt string for KoboldCpp"""
-        prompt_parts = []
-        
-        for msg in messages:
-            role = msg['role']
-            content = msg['content']
-            
-            if role == 'system':
-                prompt_parts.append(f"### System:\n{content}\n")
-            elif role == 'user':
-                prompt_parts.append(f"### Jim:\n{content}\n")
-            elif role == 'assistant':
-                prompt_parts.append(f"### Aeynis:\n{content}\n")
-        
-        prompt_parts.append("### Aeynis:\n")
-        return "\n".join(prompt_parts)
+
+    @staticmethod
+    def _get_tool_definitions() -> List[Dict]:
+        """Return OpenAI-format tool definitions for the MCP bridge tools."""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_document",
+                    "description": "Create or edit a document. Use this when you want to write a reflection, essay, poem, or any piece of writing. Content is saved to your writings folder.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "filename": {"type": "string", "description": "Name for the document"},
+                            "content": {"type": "string", "description": "The text content to write"},
+                            "append": {"type": "boolean", "description": "Append to existing document", "default": False},
+                        },
+                        "required": ["filename", "content"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_document",
+                    "description": "Read the contents of one of your documents. Use this to review your own past writings.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "filename": {"type": "string", "description": "Name or partial name of the document"},
+                        },
+                        "required": ["filename"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_documents",
+                    "description": "List all documents you have written.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "calendar_add_event",
+                    "description": "Add an event to your calendar.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string", "description": "Event title"},
+                            "date": {"type": "string", "description": "Event date (e.g. 'tomorrow', '2026-04-01')"},
+                            "time": {"type": "string", "description": "Event time (optional)", "default": ""},
+                            "description": {"type": "string", "description": "Details (optional)", "default": ""},
+                        },
+                        "required": ["title", "date"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "calendar_list_events",
+                    "description": "List upcoming events from your calendar.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "days_ahead": {"type": "integer", "description": "Days to look ahead", "default": 7},
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_time",
+                    "description": "Get the current date and time.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+        ]
+
+    async def _handle_tool_calls(self, messages: List[Dict],
+                                  tool_calls: List[Dict],
+                                  original_request: Dict) -> str:
+        """Execute tool calls and feed results back for final response.
+
+        When the model decides to call a tool, we:
+        1. Execute the tool via KoboldCpp's MCP bridge (which calls our bridge-server.py)
+        2. Append tool results to the conversation
+        3. Call the API again so the model can incorporate the results
+        """
+        # Add the assistant's tool call message to conversation
+        messages.append({
+            "role": "assistant",
+            "content": None,
+            "tool_calls": tool_calls,
+        })
+
+        # Execute each tool call and collect results
+        for tc in tool_calls:
+            func = tc.get("function", {})
+            tool_name = func.get("name", "")
+            try:
+                args = json.loads(func.get("arguments", "{}"))
+            except json.JSONDecodeError:
+                args = {}
+
+            logger.info(f"Tool call: {tool_name}({args})")
+
+            # Call the tool through KoboldCpp's MCP bridge
+            # KoboldCpp handles the MCP STDIO communication with bridge-server.py
+            # We just need to provide the tool result in the conversation
+            tool_result = self._execute_local_tool(tool_name, args)
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.get("id", ""),
+                "content": tool_result,
+            })
+
+        # Second API call — model incorporates tool results into its response
+        followup_request = {
+            "model": original_request.get("model", "mistral-nemo"),
+            "messages": messages,
+            "max_tokens": original_request.get("max_tokens", 500),
+            "temperature": original_request.get("temperature", 0.8),
+            "top_p": original_request.get("top_p", 0.9),
+        }
+
+        logger.info("Calling KoboldCpp for follow-up after tool calls...")
+        response = requests.post(
+            f"{KOBOLD_URL}/v1/chat/completions",
+            json=followup_request,
+            timeout=60,
+        )
+
+        if response.status_code == 200:
+            result = response.json()
+            return result["choices"][0]["message"].get("content", "").strip()
+        else:
+            logger.error(f"Follow-up call failed: {response.status_code}")
+            return "[Error: Could not generate response after tool use]"
+
+    def _execute_local_tool(self, name: str, args: dict) -> str:
+        """Execute a tool locally (same tools as bridge-server.py).
+
+        When the chat backend handles tool calls directly, it uses the
+        same file I/O as the MCP server to ensure consistency.
+        """
+        try:
+            if name == "get_time":
+                return f"Current time: {datetime.now().strftime('%A, %B %d, %Y at %I:%M %p')}"
+
+            elif name == "write_document":
+                filename = args.get("filename", "untitled")
+                content = args.get("content", "")
+                append = args.get("append", False)
+                writings_dir = os.path.join(os.path.expanduser("~/AeynisLibrary"), "writings")
+                safe_name = "".join(c for c in filename if c.isalnum() or c in "._- ").strip()
+                if not safe_name:
+                    safe_name = f"writing_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                if not safe_name.endswith(".md"):
+                    safe_name += ".md"
+                filepath = os.path.join(writings_dir, safe_name)
+
+                if append and os.path.exists(filepath):
+                    with open(filepath, "a", encoding="utf-8") as f:
+                        f.write(f"\n\n---\n*Continued {datetime.now().strftime('%Y-%m-%d %H:%M')}*\n\n{content}")
+                    action = "appended"
+                else:
+                    header = f"---\ntitle: {filename}\nauthor: Aeynis\ndate: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n---\n\n"
+                    with open(filepath, "w", encoding="utf-8") as f:
+                        f.write(header + content)
+                    action = "created"
+
+                size = os.path.getsize(filepath)
+                self._writing_mode = True
+                self._writing_title = filename
+                return f"Document {action}: {safe_name} ({size} bytes)"
+
+            elif name == "read_document":
+                filename = args.get("filename", "")
+                writings_dir = os.path.join(os.path.expanduser("~/AeynisLibrary"), "writings")
+                filepath = os.path.join(writings_dir, filename)
+                if not os.path.isfile(filepath):
+                    for entry in os.scandir(writings_dir):
+                        if entry.is_file() and filename.lower() in entry.name.lower():
+                            filepath = entry.path
+                            break
+                    else:
+                        return f"Document not found: {filename}"
+                with open(filepath, "r", encoding="utf-8") as f:
+                    return f"=== {os.path.basename(filepath)} ===\n{f.read()}"
+
+            elif name == "list_documents":
+                writings_dir = os.path.join(os.path.expanduser("~/AeynisLibrary"), "writings")
+                if not os.path.isdir(writings_dir):
+                    return "No writings folder found."
+                files = sorted(os.scandir(writings_dir), key=lambda e: e.stat().st_mtime, reverse=True)
+                if not files:
+                    return "No documents found."
+                lines = []
+                for f in files:
+                    if f.is_file():
+                        stat = f.stat()
+                        lines.append(f"- {f.name} ({stat.st_size} bytes, modified: {datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M')})")
+                return f"Your documents ({len(lines)} files):\n" + "\n".join(lines)
+
+            elif name == "calendar_add_event":
+                title = args.get("title", "")
+                date = args.get("date", "")
+                cal = get_calendar()
+                result = cal.add_event(title=title, date=date,
+                                       time=args.get("time", ""),
+                                       description=args.get("description", ""))
+                if result.get("success"):
+                    self._calendar_action = "add"
+                    self._calendar_data = {"title": title, "date": date}
+                    return f"Event added: '{title}' on {result['event']['date']}"
+                return f"Error: {result.get('error', 'unknown')}"
+
+            elif name == "calendar_list_events":
+                cal = get_calendar()
+                events = cal.upcoming(days=args.get("days_ahead", 7))
+                if not events:
+                    return "No upcoming events."
+                lines = [f"- {e['date']}: {e['title']}" for e in events]
+                return "Upcoming events:\n" + "\n".join(lines)
+
+            else:
+                return f"Unknown tool: {name}"
+
+        except Exception as e:
+            logger.error(f"Local tool execution error: {e}")
+            return f"Error: {str(e)}"
     
     async def evaluate_and_update_basins(self, user_message: str, assistant_response: str):
         """Call Augustus evaluator to score basin relevance and update alphas.
