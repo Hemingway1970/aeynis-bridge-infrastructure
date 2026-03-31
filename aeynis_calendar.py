@@ -287,19 +287,47 @@ class AeynisCalendar:
 
     @staticmethod
     def _parse_date(date_str: str) -> Optional[datetime]:
-        """Parse a date string in various formats."""
+        """Parse a date string in various formats.
+
+        Handles combined date+time like 'tomorrow 1:00 PM', 'next Friday 3pm'.
+        """
         date_str = date_str.strip()
 
         # Handle relative dates
         lower = date_str.lower()
         now = datetime.now()
 
+        # Extract time component if present (e.g., "tomorrow 1:00 PM" → "tomorrow" + "1:00 PM")
+        time_part = None
+        time_match = re.search(r'(\d{1,2}(?::\d{2})?\s*(?:am|pm|AM|PM))', date_str)
+        if not time_match:
+            # Try 24h format like "14:00"
+            time_match = re.search(r'(\d{1,2}:\d{2})(?!\d)', date_str)
+        if time_match:
+            time_str = time_match.group(1).strip()
+            # Parse the time
+            for tfmt in ("%I:%M %p", "%I:%M%p", "%I %p", "%I%p", "%H:%M"):
+                try:
+                    time_part = datetime.strptime(time_str, tfmt)
+                    break
+                except ValueError:
+                    continue
+            # Remove the time from the date string for date-only parsing
+            lower = date_str[:time_match.start()].strip().lower()
+            if not lower:
+                lower = "today"  # Just a time with no date means today
+
+        def _apply_time(dt: datetime) -> datetime:
+            if time_part:
+                return dt.replace(hour=time_part.hour, minute=time_part.minute, second=0)
+            return dt
+
         if lower == "today":
-            return now
+            return _apply_time(now)
         if lower == "tomorrow":
-            return now + timedelta(days=1)
+            return _apply_time(now + timedelta(days=1))
         if lower == "yesterday":
-            return now - timedelta(days=1)
+            return _apply_time(now - timedelta(days=1))
 
         # "last tuesday", "next friday", etc.
         day_names = ["monday", "tuesday", "wednesday", "thursday",
@@ -311,16 +339,16 @@ class AeynisCalendar:
                     delta = (current_day - i) % 7
                     if delta == 0:
                         delta = 7
-                    return now - timedelta(days=delta)
+                    return _apply_time(now - timedelta(days=delta))
                 elif "next" in lower:
                     delta = (i - current_day) % 7
                     if delta == 0:
                         delta = 7
-                    return now + timedelta(days=delta)
+                    return _apply_time(now + timedelta(days=delta))
                 else:
                     # Closest occurrence (past or future)
                     delta = (i - current_day) % 7
-                    return now + timedelta(days=delta)
+                    return _apply_time(now + timedelta(days=delta))
 
         # Standard formats
         for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d", "%m/%d/%Y", "%m/%d/%Y %H:%M",
