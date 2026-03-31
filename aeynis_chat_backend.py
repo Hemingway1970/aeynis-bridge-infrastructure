@@ -1378,17 +1378,15 @@ RULES:
                     return clean + f"\n\nHere's what I found:\n{tool_result}"
 
             # ── Calendar add assist ────────────────────────────────
-            add_patterns = [
-                "i'll add", "i've added", "added to my calendar",
-                "add it to my calendar", "let me add", "adding it now",
-                "to my calendar", "add to calendar", "schedule",
-            ]
+            # Only add a calendar event when JIM explicitly asks to add/schedule.
+            # Do NOT trigger just because the model says "I'll add it" unprompted.
             add_user_patterns = [
-                "add that", "add it", "schedule", "put it on",
+                "add that to", "add it to", "schedule that", "put it on",
                 "add to the calendar", "add to your calendar",
+                "schedule it", "plan it", "wanna schedule",
+                "let's schedule", "can you schedule", "can you add",
             ]
-            if (any(p in text_lower for p in add_patterns) or
-                    any(p in user_lower for p in add_user_patterns)):
+            if any(p in user_lower for p in add_user_patterns):
                 # Try to extract event details from conversation
                 # Look for time patterns and event descriptions
                 import re as _re
