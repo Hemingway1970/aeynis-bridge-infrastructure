@@ -1097,9 +1097,24 @@ RULES:
             # Build conversation context with overflow protection
             messages = [{"role": "system", "content": system_prompt}]
 
-            # Keep enough history for conversational context even during doc reads
+            # Keep enough history for conversational context even during doc reads.
+            # IMPORTANT: strip tool_calls/tool messages from history before sending
+            # to the API. The model gets confused by prior tool call patterns and
+            # stops emitting tool_calls on subsequent turns. Clean history keeps
+            # each request "fresh" for tool calling.
             max_history = 6 if injected_doc else 8
-            history_window = list(self.conversation_history[-max_history:])
+            raw_history = list(self.conversation_history[-max_history:])
+            history_window = []
+            for msg in raw_history:
+                role = msg.get("role", "")
+                # Skip tool-related messages that confuse subsequent tool calling
+                if role == "tool":
+                    continue
+                if role == "assistant" and msg.get("tool_calls"):
+                    continue
+                # Only keep clean user/assistant text messages
+                if role in ("user", "assistant") and msg.get("content"):
+                    history_window.append({"role": role, "content": msg["content"]})
 
             # On "continue reading", provide a reading anchor but keep some
             # real conversation context so Aeynis doesn't lose track of who
