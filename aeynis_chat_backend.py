@@ -1419,6 +1419,21 @@ RULES:
                 # Determine date
                 date = "tomorrow" if "tomorrow" in combined else datetime.now().strftime("%Y-%m-%d")
 
+                # Check for duplicates — don't add if a similar event already exists on this date
+                cal = get_calendar()
+                from aeynis_calendar import AeynisCalendar
+                parsed_date = AeynisCalendar._parse_date(date)
+                if parsed_date:
+                    target_date = parsed_date.strftime("%Y-%m-%d")
+                    existing = cal.list_events(start_date=target_date, end_date=target_date)
+                    # Check if any existing event has a similar title
+                    title_words = set(title.lower().split())
+                    for evt in existing:
+                        evt_words = set(evt.get("title", "").lower().split())
+                        if title_words & evt_words:  # Any word overlap = likely duplicate
+                            logger.info(f"Tool assist: skipping calendar_add — similar event '{evt['title']}' already exists on {target_date}")
+                            return None
+
                 tool_result = self._execute_local_tool("calendar_add_event", {
                     "title": title,
                     "date": date,
@@ -1580,10 +1595,22 @@ RULES:
                 title = args.get("title", "")
                 date = args.get("date", "")
                 time_str = args.get("time", "")
-                # Combine date and time for the parser (add_event parses time from date string)
                 if time_str:
                     date = f"{date} {time_str}"
                 cal = get_calendar()
+
+                # Duplicate check: don't add if similar event exists on same date
+                from aeynis_calendar import AeynisCalendar
+                parsed = AeynisCalendar._parse_date(date)
+                if parsed:
+                    target = parsed.strftime("%Y-%m-%d")
+                    existing = cal.list_events(start_date=target, end_date=target)
+                    title_words = set(title.lower().split())
+                    for evt in existing:
+                        evt_words = set(evt.get("title", "").lower().split())
+                        if title_words & evt_words:
+                            return f"Event already exists on {target}: '{evt['title']}' — not adding duplicate."
+
                 result = cal.add_event(title=title, date=date,
                                        description=args.get("description", ""))
                 if result.get("success"):
