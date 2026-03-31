@@ -1183,7 +1183,9 @@ RULES:
                 chat_request["tools"] = self._get_tool_definitions()
                 chat_request["tool_choice"] = "auto"
 
-            logger.info("Calling KoboldCpp chat completions API...")
+            # Log whether tools are included in the request
+            tools_in_request = len(chat_request.get("tools", []))
+            logger.info(f"Calling KoboldCpp chat completions API... (tools: {tools_in_request})")
             response = requests.post(
                 f"{KOBOLD_URL}/v1/chat/completions",
                 json=chat_request,
@@ -1197,10 +1199,18 @@ RULES:
             result = response.json()
             choice = result.get("choices", [{}])[0]
             message = choice.get("message", {})
+            finish_reason = choice.get("finish_reason", "unknown")
+
+            # Debug: log the full response structure to see if tool_calls exist
+            logger.info(f"Chat API response: finish_reason={finish_reason}, "
+                        f"has_content={'content' in message and bool(message.get('content'))}, "
+                        f"has_tool_calls={'tool_calls' in message and bool(message.get('tool_calls'))}, "
+                        f"message_keys={list(message.keys())}")
 
             # Check if the model made tool calls
             tool_calls = message.get("tool_calls")
             if tool_calls:
+                logger.info(f"Tool calls detected: {[tc.get('function', {}).get('name', '?') for tc in tool_calls]}")
                 generated_text = await self._handle_tool_calls(
                     messages, tool_calls, chat_request
                 )
