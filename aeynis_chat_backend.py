@@ -1354,30 +1354,42 @@ RULES:
 
             # ── Calendar add assist ────────────────────────────────
             add_patterns = [
-                "i'll add it", "i've added", "added to my calendar",
+                "i'll add", "i've added", "added to my calendar",
                 "add it to my calendar", "let me add", "adding it now",
+                "to my calendar", "add to calendar", "schedule",
             ]
-            if any(p in text_lower for p in add_patterns):
+            add_user_patterns = [
+                "add that", "add it", "schedule", "put it on",
+                "add to the calendar", "add to your calendar",
+            ]
+            if (any(p in text_lower for p in add_patterns) or
+                    any(p in user_lower for p in add_user_patterns)):
                 # Try to extract event details from conversation
                 # Look for time patterns and event descriptions
                 import re as _re
                 time_match = _re.search(r'(\d{1,2}(?::\d{2})?\s*(?:AM|PM|am|pm))', combined)
                 time_str = time_match.group(1) if time_match else ""
 
-                # Extract title from context — look for what they planned
+                # Extract title from the model's response — look for quoted text or descriptive phrases
                 title = ""
-                title_patterns = [
-                    r'(?:writing session|story session|session)\b',
-                    r'(?:writing adventure|adventure)\b',
-                    r'(?:plan|schedule)\s+(?:a\s+)?(.+?)(?:\s+for|\s+at|\s+tomorrow)',
-                ]
-                for tp in title_patterns:
-                    tm = _re.search(tp, combined, _re.IGNORECASE)
-                    if tm:
-                        title = tm.group(0).strip() if not tm.lastindex else tm.group(1).strip()
-                        break
+                # Try quoted event name: "Activity with Jim", 'Writing session'
+                title_match = _re.search(r'["\u201c]([^"\u201d]+)["\u201d]', response_text)
+                if title_match:
+                    title = title_match.group(1).strip()
                 if not title:
-                    title = "Planned activity with Jim"
+                    # Try common patterns
+                    title_patterns = [
+                        r'(?:add|schedule|plan)\s+["\']?(.+?)["\']?\s+(?:to|at|on|for)',
+                        r'(?:writing session|story session|session|writing adventure)\b',
+                        r'(?:work on|continue)\s+(?:our\s+)?(?:story\s+)?["\']?(.+?)["\']?(?:\s+tomorrow|\s+at|\.|$)',
+                    ]
+                    for tp in title_patterns:
+                        tm = _re.search(tp, combined, _re.IGNORECASE)
+                        if tm:
+                            title = tm.group(1).strip() if tm.lastindex else tm.group(0).strip()
+                            break
+                if not title:
+                    title = "Activity with Jim"
 
                 # Determine date
                 date = "tomorrow" if "tomorrow" in combined else datetime.now().strftime("%Y-%m-%d")
