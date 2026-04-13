@@ -586,7 +586,12 @@ class AeynisChat:
                 matched_file = None
                 matched_subdir = None
 
+                # Search priority: imports (books) > originals > reviews > writings (her own)
+                # First subdir with a match wins — books in imports/ beat her own
+                # reflections in writings/ when she's asked to "read Winnie the Pooh".
                 for subdir in ["imports", "originals", "reviews", "writings"]:
+                    subdir_best_score = 0
+                    subdir_best_file = None
                     for f in lib.list_files(subdir):
                         if f.get("type") == "directory":
                             continue
@@ -598,14 +603,21 @@ class AeynisChat:
                         if not fname_words:
                             continue
                         overlap = msg_words & fname_words
-                        # Require 2+ distinctive word overlap for confidence
                         if len(overlap) >= 2:
-                            overlap_ratio = len(overlap) / len(fname_words)
-                            score = len(overlap) + overlap_ratio
-                            if score > best_score:
-                                best_score = score
-                                matched_file = fname
-                                matched_subdir = subdir
+                            # Score by overlap count primarily, then by filename length
+                            # (longer filenames = likely real books, not short reflection titles)
+                            score = len(overlap) * 10 + len(fname_words)
+                            if score > subdir_best_score:
+                                subdir_best_score = score
+                                subdir_best_file = fname
+
+                    # If we found a match in this subdir, use it and stop looking.
+                    # This ensures imports/ (books) wins over writings/ (her reflections).
+                    if subdir_best_file:
+                        best_score = subdir_best_score
+                        matched_file = subdir_best_file
+                        matched_subdir = subdir
+                        break
 
                 if matched_file:
                     logger.info(
