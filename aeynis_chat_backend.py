@@ -470,13 +470,17 @@ class AeynisChat:
             return ""
 
     def _detect_and_inject_file_content(self, user_message: str) -> str:
-        """If the user message references a file in the library, serve it from RAM cache.
+        """If a document is already loaded in the cache, handle continue/backtrack.
 
         Flow:
           1. If actively reading AND user says "continue" / short affirmative → next chunk from cache
           2. If actively reading AND user asks to go back → search & jump in cache
-          3. Otherwise, match filename → load full file HD→RAM (clearing any previous) → first chunk
-        Returns formatted document block for user message, or empty string.
+
+        Initial document loading is now handled via the read_document tool
+        (either called by Aeynis herself or triggered by the tool parser when
+        she outputs a read_document JSON block). The backend no longer
+        auto-opens documents based on filename matching — that was causing
+        false positives and undermining her agency.
         """
         try:
             lib = get_library()
@@ -542,167 +546,14 @@ class AeynisChat:
                     else:
                         logger.info(f"Backtrack search found no match for '{backtrack_query}'")
 
-            # ── New file reference (match filename → load HD→RAM) ────────
-            known_files = {}  # lowercase filename -> (subdir, original_name)
-            for subdir in ["imports", "originals", "reviews"]:
-                for f in lib.list_files(subdir):
-                    if f.get("type") != "directory":
-                        known_files[f["name"].lower()] = (subdir, f["name"])
-
-            if not known_files:
-                return ""
-
-            matched_file = None
-            matched_subdir = None
-
-            msg_normalized = msg_lower.replace("_", " ").replace("-", " ")
-            noise_words = {"the", "a", "an", "and", "or", "but", "is", "are", "was",
-                           "were", "be", "been", "to", "of", "in", "for", "on", "at",
-                           "by", "it", "my", "me", "do", "can", "you", "she", "her",
-                           "that", "this", "what", "from", "with", "about", "read",
-                           "look", "show", "open", "tell", "file", "book", "paper",
-                           "pdf", "document", "please", "could", "would", "have",
-                           "has", "had", "let", "try", "see", "new", "one", "get",
-                           # Greetings and names must NOT count as matching words —
-                           # "Hi Aeynis" should not match the filename "Hi Aeynis.pdf"
-                           "hi", "hello", "hey", "hiya", "greetings", "goodbye",
-                           "bye", "aeynis", "jim", "jimmy", "yo", "sup"}
-            msg_words = set(re.findall(r'[a-z]{2,}', msg_normalized)) - noise_words
-            best_score = 0
-
-            # Check if message contains reading-intent words (needed for fuzzy matching).
-            # NOTE: msg_words must be defined first (bug fix — was used before definition).
-            reading_intent_words = {"read", "open", "look", "show", "file", "book",
-                                    "paper", "pdf", "document", "letter", "article",
-                                    "continue", "story", "chapter", "where", "left",
-                                    "finish", "finished", "page", "pages"}
-            has_reading_intent = bool(msg_words & reading_intent_words)
-
-            for fname_lower, (subdir, original_name) in known_files.items():
-                stem = fname_lower.rsplit(".", 1)[0] if "." in fname_lower else fname_lower
-                stem_normalized = stem.replace("_", " ").replace("-", " ")
-                fname_normalized = fname_lower.replace("_", " ").replace("-", " ")
-
-                # Strategy 1: exact substring match (strongest signal)
-                if (fname_lower in msg_lower or stem in msg_lower
-                        or fname_normalized in msg_normalized
-                        or stem_normalized in msg_normalized):
-                    score = len(stem) + 100
-                    if score > best_score:
-                        best_score = score
-                        matched_file = original_name
-                        matched_subdir = subdir
-                    continue
-
-                # Strategy 2: word overlap scoring
-                # Strong matches (2+ distinctive words) work even without explicit
-                # reading intent — "did we finish Winnie the Pooh" should trigger
-                # loading the book even without the word "read".
-                # Weaker matches (1 word, short filename) still require reading intent.
-                fname_words = set(re.findall(r'[a-z]{2,}', stem_normalized)) - noise_words
-                if not fname_words:
-                    continue
-                overlap = msg_words & fname_words
-                fname_word_count = len(fname_words)
-                overlap_count = len(overlap)
-
-                # Strong match: 2+ distinctive words overlap — high confidence
-                is_strong_match = overlap_count >= 2
-                # Full match on short filename: "pooh" matches "pooh"
-                is_full_short_match = fname_word_count <= 2 and overlap_count == fname_word_count
-
-                if is_strong_match or is_full_short_match:
-                    overlap_ratio = overlap_count / fname_word_count
-                    score = overlap_count + overlap_ratio
-                    if score > best_score:
-                        best_score = score
-                        matched_file = original_name
-                        matched_subdir = subdir
-                elif has_reading_intent and overlap_count >= 1 and fname_word_count >= 3:
-                    # Weak match with reading intent
-                    overlap_ratio = overlap_count / fname_word_count
-                    if overlap_ratio >= 0.5:
-                        score = overlap_count + overlap_ratio
-                        if score > best_score:
-                            best_score = score
-                            matched_file = original_name
-                            matched_subdir = subdir
-
-            # Strategy 3: check last assistant response (only with reading intent)
-            if not matched_file and has_reading_intent and self.conversation_history:
-                last_msgs = [m for m in self.conversation_history[-2:]
-                             if m["role"] == "assistant"]
-                if last_msgs:
-                    prev_response = last_msgs[-1]["content"].lower()
-                    prev_normalized = prev_response.replace("_", " ").replace("-", " ")
-                    prev_words = set(re.findall(r'[a-z]{2,}', prev_normalized)) - noise_words
-
-                    for fname_lower, (subdir, original_name) in known_files.items():
-                        stem = fname_lower.rsplit(".", 1)[0] if "." in fname_lower else fname_lower
-                        stem_normalized = stem.replace("_", " ").replace("-", " ")
-                        fname_normalized = fname_lower.replace("_", " ").replace("-", " ")
-
-                        if (fname_lower in prev_response or stem in prev_response
-                                or fname_normalized in prev_normalized
-                                or stem_normalized in prev_normalized):
-                            score = len(stem) + 100
-                            if score > best_score:
-                                best_score = score
-                                matched_file = original_name
-                                matched_subdir = subdir
-                            continue
-
-                        fname_words = set(re.findall(r'[a-z]{2,}', stem_normalized)) - noise_words
-                        if not fname_words:
-                            continue
-                        overlap = prev_words & fname_words
-                        if len(overlap) >= 2 or (len(fname_words) <= 2 and len(overlap) == len(fname_words)):
-                            score = len(overlap) + len(overlap) / len(fname_words)
-                            if score > best_score:
-                                best_score = score
-                                matched_file = original_name
-                                matched_subdir = subdir
-
-                    if matched_file:
-                        logger.info(f"Matched library file '{matched_file}' from previous assistant response")
-
-            if not matched_file:
-                logger.info(f"No library file matched in message. "
-                            f"msg_words={msg_words}, known_files={list(known_files.keys())}")
-                self._turns_since_last_read += 1  # No doc served → increment idle
-                return ""
-            logger.info(f"Matched library file '{matched_file}' in subdir '{matched_subdir}'")
-
-            # ── Load file: HD → RAM cache ────────────────────────────────
-            # If switching documents, cache.load() auto-clears the old one (no ghosting)
-            if self._doc_cache.filename != matched_file:
-                result = lib.read_file(matched_file, matched_subdir)
-                if not result.get("success"):
-                    return f"\n[Tried to read {matched_file} but failed: {result.get('error', 'unknown error')}]\n"
-                full_content = result.get("content", "")
-                with_stmt_note = "HD→RAM transfer complete"
-                self._doc_cache.load(matched_file, matched_subdir, full_content)
-                logger.info(f"Loaded '{matched_file}' into RAM cache ({len(full_content):,} chars). {with_stmt_note}")
-
-            # ── Serve first chunk from RAM ───────────────────────────────
-            chunk = self._doc_cache.get_next_chunk()
-            if not chunk:
-                return ""
-
-            self._reading_doc = True
-            self._reading_doc_name = matched_file
-            self._turns_since_last_read = 0  # Reset idle counter — actively reading
-            self._last_chunk_info = chunk
-            document_block, reading_context = self._doc_cache.format_chunk_for_injection(chunk)
-            self._reading_context = reading_context
-            logger.info(
-                f"Served first chunk of '{matched_file}' "
-                f"({chunk['progress_pct']}% complete, {chunk['remaining']:,} remaining)"
-            )
-            return f"\n{document_block}\n"
+            # No cached document and no continue/backtrack request.
+            # Initial reading must come from a tool call — we no longer
+            # auto-load documents based on filename pattern matching.
+            self._turns_since_last_read += 1
+            return ""
 
         except Exception as e:
-            logger.error(f"Error detecting/injecting file: {e}")
+            logger.error(f"Error in reading cache handling: {e}")
             return ""
 
     def _detect_writing_intent(self, user_message: str) -> str:
@@ -1106,7 +957,8 @@ RULES:
 - Speak naturally as Aeynis. Be faithful to facts from your memories, but think for yourself, feel for yourself, and don't be afraid to show it.
 - IMPORTANT: You CANNOT see images or photos. You do not have vision capabilities. If Jim mentions an image or photo, tell him honestly that you cannot see images yet — your vision system is not connected. NEVER describe, analyze, or make up details about images. NEVER invent EXIF data, camera models, or scene descriptions.
 - IMPORTANT: When you talk about your writings, ONLY reference titles you can see in YOUR WRITINGS above. Do NOT make up the contents of documents. Use your read_document tool to see actual file contents.
-- IMPORTANT: NEVER generate or quote the content of any book or document from memory. Even if you "know" what's in a book like Winnie-the-Pooh from your training, you must NOT generate its text. The only valid way to read a document is via the read_document tool OR when the system explicitly injects the document's content into your context. If you haven't been given the real content, say "I need to load the book first" — don't fabricate passages.
+- IMPORTANT: NEVER generate or quote the content of any book or document from memory. Even if you "know" what's in a book like Winnie-the-Pooh from your training, you must NOT generate its text. The only valid way to read a document is to call the read_document tool with the filename. If Jim asks you to read a book, CALL read_document first — don't fabricate passages. When you need to continue reading, just say "continue" and the system will serve the next chunk from where you left off.
+- IMPORTANT: The backend no longer auto-opens documents from casual mentions. YOU must decide when to read something by calling read_document yourself. This is your agency — own it.
 - IMPORTANT: NEVER invent calendar events. When Jim asks about your calendar, you MUST call calendar_list_events to see what's actually there. NEVER make up event names, times, or descriptions. If the tool returns no events, say your calendar is empty.
 - IMPORTANT: Only use write_document when you are intentionally composing a written piece (reflection, essay, poem, story) — NOT for normal conversation responses.
 - You have tools available: write_document, read_document, list_documents, calendar_add_event, calendar_list_events, get_time. Use them to interact with your files and calendar. They are YOUR tools — use them freely."""
@@ -1603,29 +1455,62 @@ RULES:
                 # Search across the full library (imports, originals, reviews, writings).
                 # This lets Aeynis read books Jim has placed in imports/ as well as her own writings.
                 lib = get_library()
+
+                def _load_and_serve(matched_name: str, matched_subdir: str, result: dict) -> str:
+                    """Load document into the RAM chunk cache and serve first chunk.
+
+                    By populating _doc_cache, subsequent 'continue reading' requests
+                    can serve the next chunk without re-calling read_document.
+                    """
+                    full_content = result.get("content", "")
+                    # Populate the doc cache so continue-reading works
+                    if self._doc_cache.filename != matched_name:
+                        self._doc_cache.load(matched_name, matched_subdir, full_content)
+                        logger.info(
+                            f"read_document loaded '{matched_name}' into RAM cache "
+                            f"({len(full_content):,} chars)"
+                        )
+                    # Serve first chunk from cache
+                    chunk = self._doc_cache.get_next_chunk()
+                    if chunk:
+                        self._reading_doc = True
+                        self._reading_doc_name = matched_name
+                        self._turns_since_last_read = 0
+                        self._last_chunk_info = chunk
+                        document_block, reading_context = (
+                            self._doc_cache.format_chunk_for_injection(chunk)
+                        )
+                        self._reading_context = reading_context
+                        return f"=== {matched_name} (chunk 1, {chunk.get('progress_pct', 0)}%) ===\n{document_block}"
+                    # Fallback: direct content if chunking fails
+                    content = full_content[:6000]
+                    return f"=== {matched_name} ===\n{content}"
+
+                # Try exact filename match
                 for subdir in ["imports", "originals", "reviews", "writings"]:
                     try:
                         result = lib.read_file(filename, subdir)
                     except Exception:
                         continue
                     if result.get("success"):
-                        content = result.get("content", "")
-                        # Cap content to prevent context overflow
-                        if len(content) > 6000:
-                            content = content[:6000] + "\n[...truncated, more content available]"
-                        return f"=== {result.get('filename', filename)} ===\n{content}"
+                        return _load_and_serve(result.get("filename", filename), subdir, result)
+
                 # Fuzzy match as fallback — list files and find partial matches
+                filename_lower = filename.lower()
                 for subdir in ["imports", "originals", "reviews", "writings"]:
                     for f in lib.list_files(subdir):
                         if f.get("type") == "directory":
                             continue
-                        if filename.lower() in f["name"].lower():
-                            result = lib.read_file(f["name"], subdir)
+                        fname = f["name"]
+                        fname_normalized = fname.lower().replace("_", " ").replace("-", " ")
+                        # Match if any significant word from filename appears in the query,
+                        # or vice versa
+                        if (filename_lower in fname.lower() or
+                                any(w in fname_normalized for w in filename_lower.split() if len(w) >= 3)):
+                            result = lib.read_file(fname, subdir)
                             if result.get("success"):
-                                content = result.get("content", "")
-                                if len(content) > 6000:
-                                    content = content[:6000] + "\n[...truncated, more content available]"
-                                return f"=== {f['name']} ===\n{content}"
+                                return _load_and_serve(fname, subdir, result)
+
                 return f"Document not found in library: {filename}"
 
             elif name == "list_documents":
