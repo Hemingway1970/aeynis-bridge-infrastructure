@@ -1485,11 +1485,19 @@ RULES:
 
         # Execute each tool call and collect results
         for tc in tool_calls:
-            func = tc.get("function", {})
+            func = tc.get("function") or {}
             tool_name = func.get("name", "")
-            try:
-                args = json.loads(func.get("arguments", "{}"))
-            except json.JSONDecodeError:
+            raw_args = func.get("arguments")
+            if isinstance(raw_args, dict):
+                args = raw_args
+            elif isinstance(raw_args, str) and raw_args.strip():
+                try:
+                    args = json.loads(raw_args)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    args = {}
+            else:
+                args = {}
+            if not isinstance(args, dict):
                 args = {}
 
             logger.info(f"Tool call: {tool_name}({args})")
@@ -1528,12 +1536,18 @@ RULES:
             logger.error(f"Follow-up call failed: {response.status_code}")
             return "[Error: Could not generate response after tool use]"
 
-    def _execute_local_tool(self, name: str, args: dict) -> str:
+    def _execute_local_tool(self, name: str, args: Optional[dict]) -> str:
         """Execute a tool locally (same tools as bridge-server.py).
+
+        Args may be None if the model called a tool with no arguments.
+        Normalize to empty dict so args.get(...) calls don't crash.
 
         When the chat backend handles tool calls directly, it uses the
         same file I/O as the MCP server to ensure consistency.
         """
+        # Defensive: model may pass None or non-dict as arguments
+        if args is None or not isinstance(args, dict):
+            args = {}
         try:
             if name == "get_time":
                 return f"Current time: {datetime.now().strftime('%A, %B %d, %Y at %I:%M %p')}"
@@ -1566,18 +1580,36 @@ RULES:
                 return f"Document {action}: {safe_name} ({size} bytes)"
 
             elif name == "read_document":
-                filename = args.get("filename", "")
-                writings_dir = os.path.join(os.path.expanduser("~/AeynisLibrary"), "writings")
-                filepath = os.path.join(writings_dir, filename)
-                if not os.path.isfile(filepath):
-                    for entry in os.scandir(writings_dir):
-                        if entry.is_file() and filename.lower() in entry.name.lower():
-                            filepath = entry.path
-                            break
-                    else:
-                        return f"Document not found: {filename}"
-                with open(filepath, "r", encoding="utf-8") as f:
-                    return f"=== {os.path.basename(filepath)} ===\n{f.read()}"
+                filename = args.get("filename", "") or ""
+                if not filename:
+                    return "read_document: filename is required"
+                # Search across the full library (imports, originals, reviews, writings).
+                # This lets Aeynis read books Jim has placed in imports/ as well as her own writings.
+                lib = get_library()
+                for subdir in ["imports", "originals", "reviews", "writings"]:
+                    try:
+                        result = lib.read_file(filename, subdir)
+                    except Exception:
+                        continue
+                    if result.get("success"):
+                        content = result.get("content", "")
+                        # Cap content to prevent context overflow
+                        if len(content) > 6000:
+                            content = content[:6000] + "\n[...truncated, more content available]"
+                        return f"=== {result.get('filename', filename)} ===\n{content}"
+                # Fuzzy match as fallback — list files and find partial matches
+                for subdir in ["imports", "originals", "reviews", "writings"]:
+                    for f in lib.list_files(subdir):
+                        if f.get("type") == "directory":
+                            continue
+                        if filename.lower() in f["name"].lower():
+                            result = lib.read_file(f["name"], subdir)
+                            if result.get("success"):
+                                content = result.get("content", "")
+                                if len(content) > 6000:
+                                    content = content[:6000] + "\n[...truncated, more content available]"
+                                return f"=== {f['name']} ===\n{content}"
+                return f"Document not found in library: {filename}"
 
             elif name == "list_documents":
                 writings_dir = os.path.join(os.path.expanduser("~/AeynisLibrary"), "writings")
@@ -1864,19 +1896,46 @@ RULES:
                         results.append("\n[Your calendar is empty.]")
 
                 elif tool == "read_writing":
-                    title = action.get("title", "")
-                    writing_tool = get_writing_tool()
-                    result = writing_tool.load_writing(title)
-                    if result.get("success"):
-                        body = result.get("body", result.get("content", ""))
-                        if len(body) > 2000:
-                            body = body[:2000] + "\n[...truncated]"
-                        # Store loaded writing so it's in her context next turn
-                        self._post_read_context = f"Your writing \"{result.get('title', title)}\":\n{body}"
-                        self._post_read_turns = 5
-                        logger.info(f"Loaded writing '{title}' into post-read context")
-                    else:
-                        logger.info(f"No writing found matching '{title}'")
+                    title = action.get("title", "") or ""
+                    # Search the FULL library (imports, originals, reviews, writings)
+                    # not just her own writings folder. This lets her read books
+                    # Jim placed in imports/ like "The Lion, The Witch and the Wardrobe".
+                    lib = get_library()
+                    found = False
+                    for subdir in ["writings", "imports", "originals", "reviews"]:
+                        # Try exact then fuzzy match in this subdir
+                        candidates = []
+                        try:
+                            for f in lib.list_files(subdir):
+                                if f.get("type") == "directory":
+                                    continue
+                                if (title.lower() in f["name"].lower() or
+                                        title.lower() in f["name"].lower().replace("_", " ").replace("-", " ")):
+                                    candidates.append(f["name"])
+                        except Exception:
+                            continue
+                        for fname in candidates:
+                            result = lib.read_file(fname, subdir)
+                            if result.get("success"):
+                                body = result.get("content", "")
+                                if len(body) > 4000:
+                                    body = body[:4000] + "\n[...more content available, ask to continue]"
+                                self._post_read_context = (
+                                    f"Document \"{fname}\" (from {subdir}/):\n{body}"
+                                )
+                                self._post_read_turns = 5
+                                logger.info(f"Loaded document '{fname}' from {subdir}/ into post-read context")
+                                found = True
+                                break
+                        if found:
+                            break
+                    if not found:
+                        logger.info(f"No document found matching '{title}' in library")
+                        self._post_read_context = (
+                            f"[Document '{title}' not found in library. "
+                            f"Tell Jim honestly you could not find it.]"
+                        )
+                        self._post_read_turns = 1
 
                 elif tool == "export":
                     title = action.get("title", "")
@@ -1896,18 +1955,26 @@ RULES:
     async def handle_message(self, user_message: str, include_image: bool = False) -> Dict[str, Any]:
         """Main message handling pipeline"""
         try:
-            # Guard against excessively long user input that would blow context
-            MAX_USER_MSG = 3000
+            # Guard against excessively long user input. 15K chars is roughly
+            # 3750 tokens — large enough for a substantial pasted document but
+            # not so large it blows the context window when added to history.
+            MAX_USER_MSG = 15000
             if len(user_message) > MAX_USER_MSG:
                 logger.warning(f"User message too long ({len(user_message)} chars), truncating to {MAX_USER_MSG}")
                 user_message = user_message[:MAX_USER_MSG] + "\n[Message was too long and has been trimmed]"
 
             logger.info(f"Handling message: {user_message[:50]}...")
 
-            # Save the original user message before generate_response rewrites
-            # it with injected document content (so we don't store the doc blob
-            # as "Jim said: [giant document]")
+            # Save a compact version of the user message for conversation history.
+            # Long pastes get stored as a short summary in history to prevent
+            # history pollution, but the full text is used for this turn.
             original_user_message = user_message
+            if len(user_message) > 2000:
+                # Store a compact version in history so subsequent turns don't
+                # drag the whole paste along
+                history_version = user_message[:500] + f"\n[... {len(user_message) - 500} more chars pasted]"
+            else:
+                history_version = user_message
 
             # 1. Retrieve relevant memories
             memories = await self.retrieve_relevant_memories(user_message)
@@ -1919,11 +1986,27 @@ RULES:
             # 2b. Parse structured tool tags from her response (primary path)
             # Tags like [WRITE: "title"], [CALENDAR: "event" on "date"] are stripped
             # from the displayed response and executed as tool actions.
-            # Tool results are NOT appended to the response — Jim only sees
-            # Aeynis's natural text, never raw listings or system output.
             response, tool_actions = parse_tool_tags(response)
             if tool_actions:
+                # Check if any action needs content fed back into this turn
+                # (read_writing loads file content that the model needs to see NOW,
+                #  not next turn, to produce a coherent response)
+                needs_retry = any(a.get("tool") in ("read_writing",) for a in tool_actions)
                 await self._execute_tool_actions(tool_actions, response)
+
+                # If a read_writing action loaded content, regenerate with that
+                # content available so she can actually respond about what she read
+                if needs_retry and self._post_read_context:
+                    retry_user_msg = (
+                        f"{user_message}\n\n"
+                        f"[System note: you successfully loaded this document. "
+                        f"Here is its actual content — respond based on this, do NOT make up content:]\n"
+                        f"{self._post_read_context}"
+                    )
+                    logger.info("Regenerating response with loaded document content")
+                    response = await self.generate_response(retry_user_msg, memory_context, include_image=include_image)
+                    # Parse any new tool tags from the retry response
+                    response, _ = parse_tool_tags(response)
 
             # 2c. Strip any system prompt content the model echoed back.
             # Smaller models sometimes regurgitate injected context (library
@@ -1935,7 +2018,8 @@ RULES:
 
             # 3. Update conversation history (with overflow protection)
             # Use original message, not the doc-injected version, to keep history clean
-            self.conversation_history.append({"role": "user", "content": original_user_message})
+            # Use compact version for history to prevent long pastes from bloating context
+            self.conversation_history.append({"role": "user", "content": history_version})
             self.conversation_history.append({"role": "assistant", "content": response})
 
             # Trim history if it exceeds max turns
@@ -1950,7 +2034,7 @@ RULES:
                 requests.post(
                     f"{MCP_MEMORY_URL}/api/memories",
                     json={
-                        "content": f"Jim said: {original_user_message}",
+                        "content": f"Jim said: {history_version}",
                         "tags": ["conversation", "jim", "user_input"]
                     }
                 )
