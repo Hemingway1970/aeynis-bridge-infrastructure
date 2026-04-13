@@ -552,11 +552,6 @@ class AeynisChat:
             if not known_files:
                 return ""
 
-            # Check if message contains reading-intent words (needed for fuzzy matching)
-            reading_intent_words = {"read", "open", "look", "show", "file", "book",
-                                    "paper", "pdf", "document", "letter", "article"}
-            has_reading_intent = bool(msg_words & reading_intent_words)
-
             matched_file = None
             matched_subdir = None
 
@@ -570,6 +565,14 @@ class AeynisChat:
                            "has", "had", "let", "try", "see", "new", "one", "get"}
             msg_words = set(re.findall(r'[a-z]{2,}', msg_normalized)) - noise_words
             best_score = 0
+
+            # Check if message contains reading-intent words (needed for fuzzy matching).
+            # NOTE: msg_words must be defined first (bug fix — was used before definition).
+            reading_intent_words = {"read", "open", "look", "show", "file", "book",
+                                    "paper", "pdf", "document", "letter", "article",
+                                    "continue", "story", "chapter", "where", "left",
+                                    "finish", "finished", "page", "pages"}
+            has_reading_intent = bool(msg_words & reading_intent_words)
 
             for fname_lower, (subdir, original_name) in known_files.items():
                 stem = fname_lower.rsplit(".", 1)[0] if "." in fname_lower else fname_lower
@@ -587,30 +590,39 @@ class AeynisChat:
                         matched_subdir = subdir
                     continue
 
-                # Strategy 2: word overlap scoring (only if message shows reading intent)
-                # Require strong overlap to prevent casual conversation words
-                # from accidentally matching filenames
-                if not has_reading_intent:
-                    continue
+                # Strategy 2: word overlap scoring
+                # Strong matches (2+ distinctive words) work even without explicit
+                # reading intent — "did we finish Winnie the Pooh" should trigger
+                # loading the book even without the word "read".
+                # Weaker matches (1 word, short filename) still require reading intent.
                 fname_words = set(re.findall(r'[a-z]{2,}', stem_normalized)) - noise_words
                 if not fname_words:
                     continue
                 overlap = msg_words & fname_words
                 fname_word_count = len(fname_words)
-                # Require at least 2 overlapping words, OR full match on short names
-                if fname_word_count <= 2 and len(overlap) < fname_word_count:
-                    continue
-                if fname_word_count > 2 and len(overlap) < 2:
-                    continue
-                # Also require overlap to cover a meaningful fraction of the filename
-                overlap_ratio = len(overlap) / fname_word_count
-                if overlap_ratio < 0.5:
-                    continue
-                score = len(overlap) + overlap_ratio
-                if score > best_score:
-                    best_score = score
-                    matched_file = original_name
-                    matched_subdir = subdir
+                overlap_count = len(overlap)
+
+                # Strong match: 2+ distinctive words overlap — high confidence
+                is_strong_match = overlap_count >= 2
+                # Full match on short filename: "pooh" matches "pooh"
+                is_full_short_match = fname_word_count <= 2 and overlap_count == fname_word_count
+
+                if is_strong_match or is_full_short_match:
+                    overlap_ratio = overlap_count / fname_word_count
+                    score = overlap_count + overlap_ratio
+                    if score > best_score:
+                        best_score = score
+                        matched_file = original_name
+                        matched_subdir = subdir
+                elif has_reading_intent and overlap_count >= 1 and fname_word_count >= 3:
+                    # Weak match with reading intent
+                    overlap_ratio = overlap_count / fname_word_count
+                    if overlap_ratio >= 0.5:
+                        score = overlap_count + overlap_ratio
+                        if score > best_score:
+                            best_score = score
+                            matched_file = original_name
+                            matched_subdir = subdir
 
             # Strategy 3: check last assistant response (only with reading intent)
             if not matched_file and has_reading_intent and self.conversation_history:
@@ -1090,6 +1102,7 @@ RULES:
 - Speak naturally as Aeynis. Be faithful to facts from your memories, but think for yourself, feel for yourself, and don't be afraid to show it.
 - IMPORTANT: You CANNOT see images or photos. You do not have vision capabilities. If Jim mentions an image or photo, tell him honestly that you cannot see images yet — your vision system is not connected. NEVER describe, analyze, or make up details about images. NEVER invent EXIF data, camera models, or scene descriptions.
 - IMPORTANT: When you talk about your writings, ONLY reference titles you can see in YOUR WRITINGS above. Do NOT make up the contents of documents. Use your read_document tool to see actual file contents.
+- IMPORTANT: NEVER generate or quote the content of any book or document from memory. Even if you "know" what's in a book like Winnie-the-Pooh from your training, you must NOT generate its text. The only valid way to read a document is via the read_document tool OR when the system explicitly injects the document's content into your context. If you haven't been given the real content, say "I need to load the book first" — don't fabricate passages.
 - IMPORTANT: NEVER invent calendar events. When Jim asks about your calendar, you MUST call calendar_list_events to see what's actually there. NEVER make up event names, times, or descriptions. If the tool returns no events, say your calendar is empty.
 - IMPORTANT: Only use write_document when you are intentionally composing a written piece (reflection, essay, poem, story) — NOT for normal conversation responses.
 - You have tools available: write_document, read_document, list_documents, calendar_add_event, calendar_list_events, get_time. Use them to interact with your files and calendar. They are YOUR tools — use them freely."""
