@@ -1540,15 +1540,19 @@ RULES:
                 filename = args.get("filename", "") or ""
                 if not filename:
                     return "read_document: filename is required"
+
+                # Strip URL-style anchors (#page=8, #section=foo) from the query
+                if "#" in filename:
+                    filename = filename.split("#", 1)[0]
+
                 # Search across the full library (imports, originals, reviews, writings).
                 # This lets Aeynis read books Jim has placed in imports/ as well as her own writings.
                 lib = get_library()
 
                 def _load_and_serve(matched_name: str, matched_subdir: str, result: dict) -> str:
-                    """Load document into the RAM chunk cache and serve first chunk.
-
-                    By populating _doc_cache, subsequent 'continue reading' requests
-                    can serve the next chunk without re-calling read_document.
+                    """Load document into the RAM chunk cache and serve first chunk
+                    as clean text (no metadata markers). The cache still tracks
+                    position so 'continue' works for subsequent chunks.
                     """
                     full_content = result.get("content", "")
                     # Populate the doc cache so continue-reading works
@@ -1565,11 +1569,14 @@ RULES:
                         self._reading_doc_name = matched_name
                         self._turns_since_last_read = 0
                         self._last_chunk_info = chunk
-                        document_block, reading_context = (
-                            self._doc_cache.format_chunk_for_injection(chunk)
-                        )
-                        self._reading_context = reading_context
-                        return f"=== {matched_name} (chunk 1, {chunk.get('progress_pct', 0)}%) ===\n{document_block}"
+                        # Return CLEAN text — just the chunk content, no metadata
+                        # markers. The model's job is to read this, not parse
+                        # CHUNK STARTS WITH / SECTION_BREAK metadata.
+                        chunk_text = chunk.get("text", "")
+                        pct = chunk.get("progress_pct", 0)
+                        remaining = chunk.get("remaining", 0)
+                        status = f"[{pct}% complete, {remaining:,} chars remaining — say 'continue' for next part]" if remaining > 0 else "[END OF DOCUMENT]"
+                        return f"=== {matched_name} ===\n{chunk_text}\n\n{status}"
                     # Fallback: direct content if chunking fails
                     content = full_content[:6000]
                     return f"=== {matched_name} ===\n{content}"
