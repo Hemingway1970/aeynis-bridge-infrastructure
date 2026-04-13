@@ -562,7 +562,11 @@ class AeynisChat:
                            "that", "this", "what", "from", "with", "about", "read",
                            "look", "show", "open", "tell", "file", "book", "paper",
                            "pdf", "document", "please", "could", "would", "have",
-                           "has", "had", "let", "try", "see", "new", "one", "get"}
+                           "has", "had", "let", "try", "see", "new", "one", "get",
+                           # Greetings and names must NOT count as matching words —
+                           # "Hi Aeynis" should not match the filename "Hi Aeynis.pdf"
+                           "hi", "hello", "hey", "hiya", "greetings", "goodbye",
+                           "bye", "aeynis", "jim", "jimmy", "yo", "sup"}
             msg_words = set(re.findall(r'[a-z]{2,}', msg_normalized)) - noise_words
             best_score = 0
 
