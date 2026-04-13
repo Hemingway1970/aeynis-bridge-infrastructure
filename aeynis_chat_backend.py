@@ -546,6 +546,94 @@ class AeynisChat:
                     else:
                         logger.info(f"Backtrack search found no match for '{backtrack_query}'")
 
+            # ── Explicit reading request with filename hint ──────────────
+            # Narrow safety net: if the user message contains explicit reading
+            # verbs AND mentions a distinctive word from a library filename,
+            # auto-load that file. This catches "let's continue reading Winnie
+            # the Pooh" but NOT "Hi Aeynis" (no reading verbs there).
+            #
+            # This is intentionally more conservative than the old greedy
+            # matching. Required:
+            #   - User message has explicit reading verb
+            #   - 2+ distinctive words (after filtering greetings/names/etc.)
+            #     overlap between message and a filename
+            explicit_read_verbs = [
+                "read", "reading", "continue reading", "keep reading",
+                "pick up where", "left off", "next chapter", "next page",
+                "read me", "read to me", "read aloud", "read the",
+            ]
+            has_explicit_read = any(v in msg_lower for v in explicit_read_verbs)
+
+            if has_explicit_read:
+                lib = get_library()
+                noise_words = {
+                    "the", "a", "an", "and", "or", "but", "is", "are", "was",
+                    "were", "be", "been", "to", "of", "in", "for", "on", "at",
+                    "by", "it", "my", "me", "do", "can", "you", "she", "her",
+                    "that", "this", "what", "from", "with", "about", "read",
+                    "reading", "look", "show", "open", "tell", "file", "book",
+                    "paper", "pdf", "document", "please", "could", "would",
+                    "have", "has", "had", "let", "try", "see", "new", "one",
+                    "get", "continue", "keep", "next", "chapter", "page",
+                    "left", "off", "where", "pick", "up", "aloud",
+                    "hi", "hello", "hey", "hiya", "greetings", "goodbye",
+                    "bye", "aeynis", "jim", "jimmy", "yo", "sup",
+                }
+                msg_normalized = msg_lower.replace("_", " ").replace("-", " ")
+                msg_words = set(re.findall(r'[a-z]{2,}', msg_normalized)) - noise_words
+
+                best_score = 0
+                matched_file = None
+                matched_subdir = None
+
+                for subdir in ["imports", "originals", "reviews", "writings"]:
+                    for f in lib.list_files(subdir):
+                        if f.get("type") == "directory":
+                            continue
+                        fname = f["name"]
+                        fname_lower = fname.lower()
+                        stem = fname_lower.rsplit(".", 1)[0] if "." in fname_lower else fname_lower
+                        stem_normalized = stem.replace("_", " ").replace("-", " ")
+                        fname_words = set(re.findall(r'[a-z]{2,}', stem_normalized)) - noise_words
+                        if not fname_words:
+                            continue
+                        overlap = msg_words & fname_words
+                        # Require 2+ distinctive word overlap for confidence
+                        if len(overlap) >= 2:
+                            overlap_ratio = len(overlap) / len(fname_words)
+                            score = len(overlap) + overlap_ratio
+                            if score > best_score:
+                                best_score = score
+                                matched_file = fname
+                                matched_subdir = subdir
+
+                if matched_file:
+                    logger.info(
+                        f"Explicit read request matched '{matched_file}' "
+                        f"in {matched_subdir}/ (score={best_score:.2f})"
+                    )
+                    # Load into doc cache if not already
+                    if self._doc_cache.filename != matched_file:
+                        result = lib.read_file(matched_file, matched_subdir)
+                        if not result.get("success"):
+                            return f"\n[Could not read {matched_file}: {result.get('error', 'unknown')}]\n"
+                        self._doc_cache.load(
+                            matched_file, matched_subdir, result.get("content", "")
+                        )
+                        logger.info(f"Loaded '{matched_file}' into RAM cache")
+
+                    chunk = self._doc_cache.get_next_chunk()
+                    if chunk:
+                        self._reading_doc = True
+                        self._reading_doc_name = matched_file
+                        self._turns_since_last_read = 0
+                        self._last_chunk_info = chunk
+                        document_block, reading_context = (
+                            self._doc_cache.format_chunk_for_injection(chunk)
+                        )
+                        self._reading_context = reading_context
+                        return f"\n{document_block}\n"
+
             # No cached document and no continue/backtrack request.
             # Initial reading must come from a tool call — we no longer
             # auto-load documents based on filename pattern matching.
